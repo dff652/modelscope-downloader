@@ -1,0 +1,14 @@
+# pyinstaller / build 产物
+build/
+dist/
+*.spec
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+# 下载的模型 / 临时
+models/
+*.tar
+*.tar.sha256
