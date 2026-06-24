@@ -12,7 +12,7 @@
 **第一步该干什么（按优先级）**：
 
 1. **真机出 exe —— 唯一的真机阻塞项**。上次在 `D:\ts-plat\modelscope\` 跑 `build.bat`，卡在那台机器只有**微软商店 `python.exe` 别名占位**（不是真 Python，`--version` 无输出）。→ 装 **64 位 Python 3.11**（python.org，勾 Add to PATH）+ **关应用执行别名**（设置→应用→高级应用设置→应用执行别名→关 `python.exe`/`python3.exe`）+ 开**新** cmd → 重下 `dist/` 里的 zip 解压后跑 `build.bat`。它现在会：环境关卡 → pip（默认源失败自动换**清华镜像**）→ `python -m PyInstaller` 打包 → 出 `dist\ModelScopeDownloader.exe`，**全程写 `build.log`**。目标：双击开 GUI + 下个小模型（`Qwen/Qwen3-0.6B`）+ 走一遍下完「打包成 .tar」。pyinstaller 若缺 hidden-import，逐个补回 `build.bat`。失败就把 `build.log` 带回。
-2. ~~推上 GitHub~~ ✅ **已完成**（2026-06-24，SSH push，远端 `main = e3278d1`）。本机原来就有可用的 `~/.ssh/id_ed25519`（绑 `dff652`），把 origin 从 HTTPS 改 SSH 即推成——START-HERE 旧记的「本机无凭据」不准。剩：加 LICENSE。
+2. ~~推上 GitHub~~ ✅ **已完成**（2026-06-24，SSH push，远端 `main = e3278d1`）。本机原来就有可用的 `~/.ssh/id_ed25519`（绑 `dff652`），把 origin 从 HTTPS 改 SSH 即推成——START-HERE 旧记的「本机无凭据」不准。~~加 LICENSE~~ ✅ 已加（MIT）。
 3. **未决：构建路线 A/B/C**（A=本机 Docker+Wine 打包 / B=Go 重写真原生小 exe / C=GitHub Actions）——见下方「构建方式」节，默认先走 **A**。
 
 （已完成项、未做项、踩过的坑、构建路线细节全在下面各节。）
@@ -72,8 +72,8 @@ modelscope-downloader/
 
 1. **在一台真 Windows 上跑 `build.bat`** → 修 pyinstaller 缺的 hidden-imports（看 exe 运行时报的 `ModuleNotFoundError` 逐个补），直到双击能开 GUI + 下成一个小模型 + **走一遍下完「打包成 .tar」**。把可用的 pyinstaller flags/`.spec` 固化回 `build.bat`。← **唯一的真机阻塞项，本机 Linux 做不了**。
 2. ~~加「下载完自动打 tar + 出 sha256」~~ ✅ 已做（`--tar` / GUI 弹问，已 Linux 实测）。~~`--include` 预设跳 video/preprocessor~~ ✅ 已做（`--skip-media`，exclude 式更安全，不怕漏权重）。剩：放一个真 `icon.ico`（`--icon` 接线已就绪）。
-3. ✅ 已出**源码 release zip**（`dist/modelscope-downloader-win.zip`，含 app.py/build.bat/requirements.txt/README，发给有 Windows 的打包者）。剩：真机出 **exe** + 写给操作员的一页纸。
-4. ✅ git remote 已 **push 成功**（origin 改 SSH `git@github.com:dff652/modelscope-downloader.git`，远端 `main = e3278d1`，本地已设上游）。剩：加 LICENSE。
+3. ✅ 已出**源码 release zip**（`dist/modelscope-downloader-win.zip`，含 app.py/build.bat/requirements.txt/README，发给有 Windows 的打包者）。✅ **操作员一页纸**已写（`操作员须知.txt`，纯文本随 exe 发，无术语）。剩：真机出 **exe**；下次重做 dist zip 时把 `操作员须知.txt` 一并打进去。
+4. ✅ git remote 已 **push 成功**（origin 改 SSH `git@github.com:dff652/modelscope-downloader.git`，远端 `main = e3278d1`，本地已设上游）。✅ LICENSE 已加（MIT）。
 
 ## 构建方式：出 Windows exe 的几条路（2026-06-24 调研，**未决，先记录**）
 
