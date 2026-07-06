@@ -15,7 +15,7 @@ import threading
 import time
 
 APP_TITLE = "ModelScope Downloader"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 
 def _harden_stdio():
@@ -271,10 +271,34 @@ def _self_cmd(cli_args):
     return [sys.executable, os.path.abspath(__file__)] + cli_args
 
 
+_TQDM_NOISE = None  # 延迟编译的正则（GUI 才用得到）
+
+
+def _clean_child_line(line):
+    """清洗下载子进程的输出行：去终端控制符；tqdm 进度条行直接丢弃。
+
+    tqdm 的多行进度条靠 \\r 和 ESC[A（光标上移）原地重画，GUI 文本框不认，
+    显示成「□ [A 1%|…」刷屏（真机实测）。总进度父进程自己算，这些行没价值。
+    返回 None 表示该丢。
+    """
+    global _TQDM_NOISE
+    import re
+    if _TQDM_NOISE is None:
+        _TQDM_NOISE = (re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\r\x08]"),
+                       re.compile(r"\d+%\||\d+(\.\d+)?[KMG]?B?/s\]|\[A\b"))
+    esc_re, bar_re = _TQDM_NOISE
+    line = esc_re.sub("", line).rstrip()
+    if not line or bar_re.search(line):
+        return None
+    return line
+
+
 def _spawn_downloader(cli_args):
-    """起下载子进程：stdout/stderr 合流、UTF-8、Windows 下不弹黑窗。"""
+    """起下载子进程：stdout/stderr 合流、UTF-8、关 tqdm、Windows 下不弹黑窗。"""
     import subprocess
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    # TQDM_DISABLE：新版 tqdm 认这个环境变量；老版不认也没事，父进程还有行过滤
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+               TQDM_DISABLE="1")
     return subprocess.Popen(
         _self_cmd(cli_args),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -389,11 +413,11 @@ def run_gui():
             state["proc"] = proc
             q.put(("__STARTED__", target))
 
-            # 3) 转发子进程输出到日志框
+            # 3) 转发子进程输出到日志框（tqdm 进度条行等噪音直接丢）
             tail = []
             for line in proc.stdout:
-                line = line.rstrip("\n")
-                if line.strip():
+                line = _clean_child_line(line.rstrip("\n"))
+                if line:
                     tail = (tail + [line])[-8:]
                     q.put(line + "\n")
             rc = proc.wait()
@@ -492,6 +516,25 @@ def run_gui():
                     status_var.set("已停止 — 再点「下载」从断点继续")
                     status.config(foreground="#c60")
                     log_ui(f"[!] 已停止。已下载的部分保留在 {target}，重下同一模型即续传。")
+                    # 不打算继续了？可当场取消（删掉已下载部分腾盘）
+                    got = dir_size(target) if os.path.isdir(target) else 0
+                    if got > 0 and messagebox.askyesno(
+                            APP_TITLE,
+                            f"已停止。已下载 {human(got)} 保留在：\n{target}\n\n"
+                            f"以后还要继续下这个模型吗？\n"
+                            f"「是」= 保留（下次点下载从断点继续）\n"
+                            f"「否」= 取消本次下载，删除已下载的部分腾出磁盘") is False:
+
+                        def cleaner(path=target):
+                            import shutil
+                            try:
+                                shutil.rmtree(path)
+                                q.put(f"[ok] 已删除 {path}\n")
+                            except Exception as e:  # noqa: BLE001
+                                q.put(f"[x] 删除失败：{e}\n")
+
+                        status_var.set("已取消，正在删除已下载的部分…")
+                        threading.Thread(target=cleaner, daemon=True).start()
                 elif isinstance(item, tuple) and item and item[0] == "__DONE__":
                     _, ok, err, target = item
                     dl_btn.config(state="normal")
