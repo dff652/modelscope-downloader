@@ -5,6 +5,14 @@
 
 ## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-07-06
 
+### v0.3.1（同日第三轮，真机截图反馈驱动）
+
+- ✅ **日志 tqdm 乱码刷屏修掉**（真机截图实锤：子进程 tqdm 多行进度条靠 `\r`/`ESC[A` 原地重画，GUI 文本框显示成 `□ [A 1%|…`）：子进程 env `TQDM_DISABLE=1` + 父进程 `_clean_child_line()` 行过滤双保险，用真机噪音样本写了单测（噪音全丢、正文全留）。
+- ✅ **停止后可「取消」**：停止弹窗问「还继续吗？」，选「否」后台线程 `rmtree` 删除已下载部分腾盘；选「是」保留断点（原行为）。
+- ✅ Release 资产文件名带版本号（`ModelScopeDownloader-vX.Y.Z.exe`），自 v0.3.1 起生效。
+- 状态：commit `f506f0e` CI 全绿，`v0.3.1` tag 已打（Release 自动发布中，资产名应为 `ModelScopeDownloader-v0.3.1.exe`）。
+- **第一步**：真机下 v0.3.1 验三处：日志干净、停止→「否」删干净、进度条/ETA 如实。之后小项：icon.ico、打 tar 的真进度、（远期）文件级进度/限速。
+
 ### v0.3.0（同日第二轮，用户真机反馈驱动）
 
 - ✅ **GUI 已在真机开起来**（用户 Win10 双击 v0.2.1 exe 成功，界面/下载均工作）——最后的未验项过了。用户反馈三点：要进度/网速、要停止续传、0.0B 刷屏。
@@ -21,6 +29,74 @@
 - **CI 首轮曾失败**，病因不是打包而是**中文输出在非 UTF-8 控制台崩**（cp1252 管道 print 中文 → `UnicodeEncodeError`，英文 Windows 也会炸）。已修：`app.py` `_harden_stdio()`（`errors="replace"`），本机 ascii 控制台复现+验证。CI 失败现在会**自动开公开 issue 附冒烟日志**（本机无 admin token 拉不了 Actions 日志，这是排错通道）。
 - **唯一残余未验项：GUI 没在真 Windows 上点过**（tkinter 窗口/弹窗/浏览文件夹）。CLI 路径已被 CI 端到端实证，GUI 与之共享全部 import 和下载逻辑，风险低但要真机双击一次才算闭环。
 - 下面 06-24 的快照保留作历史。
+
+## 🕳️ 踩坑与结论（2026-07-06 会话，v0.2.1→v0.3.1 全过程）
+
+> 本节记录一整天三轮迭代的排查过程与结论，按「现象 → 排查 → 结论/解法」组织。下个会话遇到同类问题先查这里。
+
+### 会话时间线（讨论过程概要）
+
+1. **开工**：按 06-24 快照，两个外部阻塞（真机 exe、git push）。核对本机环境时发现快照记录有误 → push 当场解决。
+2. **用户问「能不能做成 exe」+ 提了 Seiya(pynsist系) 参考** → 评估三条路线，选 **路线 C（GitHub Actions）**：仓库已在 GitHub、`windows-latest` 是真 Windows、零本机折腾；Seiya/pynsist 留作 PyInstaller 失败时的 B 方案（不冻结代码、无 hidden-import 问题、Linux 装 NSIS 可直接出安装包，但产物是安装器不是绿色单 exe，且是个人 fork 成熟度未知）。
+3. **CI 首轮失败 → 修编码 bug → 全绿 → 发 v0.2.1**（Release-on-tag 机制同步落地）。
+4. **用户真机双击成功**（GUI 最后未验项闭环），反馈：要进度/网速、要停止、0.0B 刷屏 → **v0.3.0**（进度条/ETA/停止/磁盘预检，GUI 下载改子进程架构）。
+5. **用户再发真机截图**：日志 tqdm 乱码刷屏、想要「取消」 → **v0.3.1**。
+
+### 坑 1：文档说「本机无 git 凭据」——其实 SSH 一直能用
+
+- **现象**：06-24 快照记「push 未成功，本机无凭据」。
+- **排查**：`ls ~/.ssh` 有 `id_ed25519`；`ssh -T git@github.com` 返回 `Hi dff652!`（走 `ssh.github.com:443`）。`~/.git-credentials` 里确实没 GitHub token（只有内网 Bitbucket），HTTPS 不行 ≠ SSH 不行。
+- **结论**：给 dff652 的仓库配 remote 直接用 SSH URL。**动手前先验证文档断言**——快照可能过时或以偏概全。
+
+### 坑 2：GitHub Actions 日志本机拉不到（差点盲修）
+
+- **现象**：CI 失败，`GET /actions/runs/{id}/logs` 返回 403「Must have admin rights」；本机无 gh CLI、无 token（SSH 只管 git 协议）。
+- **解法**：workflow 加 `if: failure()` 步骤，用内置 `GITHUB_TOKEN`（`permissions: issues: write`）把冒烟日志**开成公开 issue**（打 `ci-failure` 标签）——公开仓库 issue 无需凭据即可读。jobs/steps 的**结论**（哪步挂了）本来就是公开 API，先看它定位，再看 issue 拿细节。
+
+### 坑 3：CI 首轮失败真凶 = 中文输出在非 UTF-8 控制台崩（不是打包问题）
+
+- **现象**：两个 PyInstaller 构建全绿，挂在最简单的 `smoketest.exe --help`。
+- **排查**：`--help` 打印中文帮助文本；CI 管道 stdout 编码 cp1252 → `print` 抛 `UnicodeEncodeError` → 退出码 1。**本机复现**：`PYTHONIOENCODING=ascii python3 app.py --help` 旧代码同样崩（先证伪「打包问题」猜想再动手）。
+- **解法**：`_harden_stdio()` —— `sys.stdout/stderr.reconfigure(errors="replace")`，编不出的字符打 `?` 不崩。**结论**：纯中文输出的工具必须假设控制台编码不友好（英文 Windows=cp1252、CI=管道），这不是 CI 特有问题。
+
+### 坑 4：最大未知被证伪——`--collect-all modelscope` 零补丁够用
+
+- 06-24 档案把「pyinstaller 漏 modelscope 动态 import」列为最大风险（预期要逐个补 hidden-import）。**实际：一个都不用补**。CI 冒烟用 frozen exe 真连 modelscope.cn 下载 + 打 tar + `Get-FileHash` 复核，全过。
+- modelscope 1.38 已把实现拆到独立的 `modelscope_hub` 包（`modelscope.hub.*` 变 compat 壳），`--collect-all modelscope` 依然打得全（它是普通依赖导入，非动态）。
+
+### 坑 5：pwsh 双引号 here-string 会吃反引号
+
+- Release notes 用 `@" … "@` 时，markdown 的 `` ` `` 是 pwsh 转义符会被吞。**内容无需变量插值时一律用单引号 here-string `@' … '@`**。
+
+### 坑 6：`HubApi.get_model_files` 不收 `revision`
+
+- **现象**：`expected_total()` 静默失败（清单行不出现）。定位：这版 API（`LegacyHubApi`）签名只有 `(model_id, recursive)`，传 `revision=None` 直接 `TypeError`。
+- **解法**：`inspect.signature` 探测后按需传参。**教训**：静默降级（`except: return None`）方便产品但会藏 bug——开发期先让它响，再决定吞不吞。
+
+### 坑 7：GUI「已下载 0.0B」不是轮询 bug
+
+- **排查**：本机真下载探针（起下载进程，旁路每秒 `du`）证实：断点文件 `<文件名>.incomplete` **就写在目标目录**，t=3s 起字节就开始涨；0.0B 只是「取清单+建连接」阶段。
+- **解法**：该阶段明确显示「查询模型清单…」；总进度用 `dir_size(target)`（`.incomplete` 计入，续传时百分比自动正确）。
+
+### 坑 8：`snapshot_download` 是阻塞调用 → 「停止」必须靠子进程
+
+- 线程内无法中途取消阻塞的库调用（杀线程不安全、网络 IO 继续偷跑）。**GUI 下载改为子进程**：`_spawn_downloader()` 以 CLI 模式重跑自身（frozen 下 `sys.executable` 就是 exe 本体）——停止 = `kill` 子进程，干净；`.incomplete` 保留 → 再点下载即续传。附带收益：下载崩溃不连累 GUI。
+- 子进程管道注意：`PYTHONIOENCODING=utf-8` 统一两端编码；`CREATE_NO_WINDOW` 防黑窗；windowed exe 被管道接住时 stdout 有效（CI Smoke 3 专验此模式），无管道时 `sys.stdout=None`、`print` 是静默 no-op（不会崩）。
+
+### 坑 9：tqdm 进度条在 GUI 文本框变乱码刷屏（真机截图实锤）
+
+- **现象**：日志框满屏 `□ [A 1%|…`。tqdm 多行进度条靠 `\r` 和 `ESC[A`（光标上移）原地重画，文本框不认控制符。
+- **解法**：双保险——子进程 env `TQDM_DISABLE=1`（新版 tqdm 认）+ 父进程 `_clean_child_line()` 正则过滤（剥控制符、丢进度条行）。**用真机截图的实际噪音当测试样本**，同时断言正文行（`[*]/[ok]/[!]`/logger）不被误伤。
+
+### 坑 10：测试写法——`| head -4` 掐管道会把下载进程拖进重试黑洞
+
+- 下载进程后续 `print`/tqdm 写已关闭的管道 → `BrokenPipeError` → 被 `snapshot_download` 外面的重试循环捕获 → 指数退避等满 20 次（假死数分钟）。**验证长命令输出一律落文件再查**，别在活管道上 `head`。
+
+### 本会话固化的工程机制
+
+- **CI（`build-windows-exe.yml`）**：push main → 真 Windows 构建 + 三重冒烟（console `--help`；console 真下载+tar+sha256 复核；**windowed exe 管道跑 CLI**=GUI 子进程模式）→ exe 挂 Artifacts（90天/需登录）。失败自动开 issue 带日志。
+- **发版**：打 `v*` tag → 同套关卡全过才发 Release（公开/永久/免登录），资产名 `ModelScopeDownloader-vX.Y.Z.exe`（自 v0.3.1）。GUI 标题栏也显示版本，双保险。
+- **测试基线（本机 Linux 能跑的）**：`py_compile`；CLI 真下载（venv + `--include "*.json"` 秒级完成）；`_spawn_downloader` 子进程真下载；mock tkinter 构造；过滤器/清单单测。
 
 ## 历史快照 — 截至 2026-06-24
 
@@ -44,12 +120,16 @@ worker08（910C，air-gapped）等机器没外网，模型得在联网机下好�
 
 ```
 modelscope-downloader/
-├── app.py              核心 download() + make_archive() + CLI(argparse) + GUI(tkinter); 无参数→GUI, 带参数→CLI
-├── build.bat           Windows 上 pyinstaller 出 exe（含 build.log + 清华镜像回退 + 环境关卡）
+├── app.py              核心 download()/make_archive()/expected_total() + CLI + GUI(tkinter, 下载走子进程)
+├── build.bat           Windows 本地 pyinstaller 出 exe（备用路径；CI 是主发布通道）
+├── .github/workflows/
+│   └── build-windows-exe.yml  CI：真Windows构建+三重冒烟+Artifacts；v* tag 自动发 Release
 ├── requirements.txt    modelscope (+构建时 pyinstaller)
 ├── README.md           操作员/打包者/CLI 用法
 ├── START-HERE.md       本文（开发起点）
-├── dist/               modelscope-downloader-win.zip（源码 zip：app.py+build.bat+requirements.txt+README，发给打包者；被 .gitignore 忽略，未入库）
+├── 操作员须知.txt      给操作员的一页纸（随 exe 分发，无术语）
+├── LICENSE             MIT
+├── dist/               modelscope-downloader-win.zip（源码 zip，发给打包者；.gitignore 忽略）
 └── .gitignore          build/ dist/ *.spec models/ *.tar 等
 ```
 
@@ -78,23 +158,23 @@ modelscope-downloader/
   - **已在真 Windows 首跑一次**（`D:\ts-plat\modelscope\`）：环境关卡正常工作，逮到真机的 **微软商店 `python.exe` 别名占位**坑（`...\WindowsApps\python.exe`，非真 Python，`--version` 无输出）。初版把空输出**误报成「32 位」**，已修：现在 `for /f` 取 `python --version`，无输出→明确报「商店占位/没装 Python」并给「装 64 位 python.org + 关应用执行别名 + 开新窗口重跑」三步；位数关卡只在真有版本号时才判。**还没跑到 pip/打包那步**（卡在没真 Python）。
   - 存盘须 UTF-8 无 BOM（已确保；BOM 会毁第 1 行）。下一真机步骤：装好 64 位 Python 后重下 `dist/` 里的 zip 再跑。
 
-## ⚠️ 未做 / 未测（**关键，下个会话先干这些**）
+## ⚠️ 未做 / 未测（06-24 原文 + 07-06 核销标注）
 
-1. **GUI 没在真 Windows 上跑过**：tkinter 行为、文件夹选择、弹窗、线程刷新都只在逻辑上正确，**待真机验证**（dev box 是 Linux 无显示，跑不了 GUI）。
-2. **exe 没在 Windows 构建/测过**：`pyinstaller --collect-all modelscope` 多半还**缺 hidden-imports**（modelscope 动态 import 多），首次构建大概率要补 `--hidden-import` 或 `--collect-submodules`；exe 体积会很大（modelscope 依赖重）。**这是最大未知**。
-3. 进度是 `dir_size` 轮询（**粗略**），不是真百分比；tqdm 在 `--windowed` 无 console 不显示（故才用轮询）。可改成解析 modelscope 回调/总大小。
-4. **无图标文件**（build.bat 已会自动认 `icon.ico`，但还没有这个文件）/ 无签名（Windows SmartScreen 可能拦未签名 exe，要让操作员「仍要运行」）。
-5. 无自动更新 / 版本检查；无 LICENSE。
-6. **打包大模型的磁盘/耗时未在真机量过**：300G 打 tar 要再占 ~300G 且耗时数分钟，GUI 里只 log「打包中…」没真进度条。
+1. ~~GUI 没在真 Windows 上跑过~~ ✅ **07-06 真机双击 v0.2.1/v0.3.0 跑通**（下载/停止/弹窗均工作）。
+2. ~~exe 没在 Windows 构建/测过；缺 hidden-imports 是最大未知~~ ✅ **证伪**：`--collect-all modelscope` 零补丁，CI 真下载冒烟全过（见「踩坑 4」）。
+3. ~~进度是 dir_size 轮询（粗略）~~ ✅ v0.3.0：清单总大小 → 真百分比 + 网速 + ETA（`dir_size` 仍是测量手段，但配上总量就是真进度，见「踩坑 7」）。
+4. **无图标文件** / 无签名（SmartScreen 拦未签名 exe，操作员须知已写「仍要运行」步骤）。← 仍未做
+5. 无自动更新 / 版本检查；~~无 LICENSE~~ ✅ 已加 MIT。
+6. **打包大模型的磁盘/耗时未在真机量过**：300G 打 tar 要再占 ~300G 且耗时数分钟，GUI 里只 log「打包中…」没真进度条。← 仍未做（磁盘预检已能提前预警空间问题）
 
 ## 下一步（开发待办，按优先级）
 
-1. **在一台真 Windows 上跑 `build.bat`** → 修 pyinstaller 缺的 hidden-imports（看 exe 运行时报的 `ModuleNotFoundError` 逐个补），直到双击能开 GUI + 下成一个小模型 + **走一遍下完「打包成 .tar」**。把可用的 pyinstaller flags/`.spec` 固化回 `build.bat`。← **唯一的真机阻塞项，本机 Linux 做不了**。
+1. ~~在一台真 Windows 上跑 `build.bat` 出 exe~~ ✅ **07-06 用路线 C（GitHub Actions）解决**：CI 出 exe + 冒烟 + Release，hidden-imports 一个没缺。`build.bat` 仍保留（给无外网/想本地打包的场景），flags 与 CI 一致。
 2. ~~加「下载完自动打 tar + 出 sha256」~~ ✅ 已做（`--tar` / GUI 弹问，已 Linux 实测）。~~`--include` 预设跳 video/preprocessor~~ ✅ 已做（`--skip-media`，exclude 式更安全，不怕漏权重）。剩：放一个真 `icon.ico`（`--icon` 接线已就绪）。
 3. ✅ 已出**源码 release zip**（`dist/modelscope-downloader-win.zip`，含 app.py/build.bat/requirements.txt/README，发给有 Windows 的打包者）。✅ **操作员一页纸**已写（`操作员须知.txt`，纯文本随 exe 发，无术语）。剩：真机出 **exe**；下次重做 dist zip 时把 `操作员须知.txt` 一并打进去。
 4. ✅ git remote 已 **push 成功**（origin 改 SSH `git@github.com:dff652/modelscope-downloader.git`，远端 `main = e3278d1`，本地已设上游）。✅ LICENSE 已加（MIT）。
 
-## 构建方式：出 Windows exe 的几条路（2026-06-24 调研，**未决，先记录**）
+## 构建方式：出 Windows exe 的几条路（06-24 调研；**07-06 已决：路线 C 落地**，A/B 留档备用）
 
 **为什么现在这套折腾**：PyInstaller **不是把代码编译成原生二进制**，而是把**整个 Python 解释器 + 脚本打包**。后果：① 不能跨平台编译，**必须在 Windows 上 build**；② build 机必须装真 Python；③ 产物大（几十~上百 MB）、易被杀软误报。本会话真机首跑就栽在 ① + 一个 Windows 经典坑——`where python` 命中**微软商店 `python.exe` 别名占位**（`...\WindowsApps\python.exe`，不是真 Python，跑 `--version` 无输出）。`build.bat` 已加针对该坑的诊断。
 
