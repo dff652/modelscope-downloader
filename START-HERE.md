@@ -5,6 +5,13 @@
 
 ## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-07-06
 
+### v0.3.2（同日第四轮）
+
+- ✅ **作者信息/GitHub 地址**进三处：GUI 底部可点击「关于」行（`webbrowser.open`）、CLI `--help` 尾注、**exe 文件属性**（CI 从 `app.py` 的 `APP_VERSION/APP_AUTHOR/APP_URL` 自动生成 `version_info.txt` → PyInstaller `--version-file`；升版本只改 `APP_VERSION` 一处不漂移）。
+- Release 已出：`ModelScopeDownloader-v0.3.2.exe`（含 v0.3.0/0.3.1 全部改动）。
+- **第一步**：真机验 v0.3.2 五处——日志干净、停止→「否」删干净、进度条/ETA、关于行点击开仓库、右键 exe 属性有作者/版本。
+- 坑备注：PyInstaller 的 `versioninfo` 模块 import 需要 win32api，**Linux 上验不了完整解析**；用桩类 eval 可验语法结构（PyInstaller 加载即 eval+命名空间注入）。
+
 ### v0.3.1（同日第三轮，真机截图反馈驱动）
 
 - ✅ **日志 tqdm 乱码刷屏修掉**（真机截图实锤：子进程 tqdm 多行进度条靠 `\r`/`ESC[A` 原地重画，GUI 文本框显示成 `□ [A 1%|…`）：子进程 env `TQDM_DISABLE=1` + 父进程 `_clean_child_line()` 行过滤双保险，用真机噪音样本写了单测（噪音全丢、正文全留）。
