@@ -5,6 +5,17 @@
 
 ## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-07-06
 
+### v0.3.0（同日第二轮，用户真机反馈驱动）
+
+- ✅ **GUI 已在真机开起来**（用户 Win10 双击 v0.2.1 exe 成功，界面/下载均工作）——最后的未验项过了。用户反馈三点：要进度/网速、要停止续传、0.0B 刷屏。
+- ✅ **v0.3.0 全部做完**（commit `75a2167`，tag `v0.3.0`）：进度条+百分比+网速(EMA)+ETA；「停止」按钮（GUI 下载改**子进程**——`_spawn_downloader` 以 CLI 模式重跑自身，kill 即停，`.incomplete` 保留续传）；`expected_total()` 拿清单总大小 → 真百分比 + **磁盘空间预检**；关窗确认杀子进程；日志不再 2s 刷屏。
+- **0.0B 之谜已实证**：断点文件（`.incomplete`）就写在目标目录，轮询没错；0.0B 只是「取清单+连接」阶段（本机真下载探针确认，t=3s 起就有字节）。
+- **API 坑**：`HubApi.get_model_files(model, recursive=True)` **不收 `revision`**（modelscope 1.38 / LegacyHubApi），expected_total 里已做签名探测。modelscope 1.38 实现已拆到 `modelscope_hub` 包，`--collect-all modelscope` 在 CI 仍打得全。
+- CI 加 **Smoke 3**：windowed exe 用管道跑 CLI（= GUI 子进程模式）真下载——绿。
+- 剩余小项：真机确认 v0.3.0 GUI 的进度/停止体验；icon.ico；（远期）文件级进度、限速。
+
+### v0.2.x（同日第一轮）
+
 - ✅ **exe 已产出并通过真 Windows 冒烟（路线 C：GitHub Actions）**。v0.2.1，commit `9bffadb`。workflow `.github/workflows/build-windows-exe.yml` 在 `windows-latest` 上：PyInstaller 打窗口版 exe + console 冒烟版 → `--help` → **真下 `Qwen/Qwen3-0.6B` 的 `*.json` + `--tar` + `Get-FileHash` 复核 sha256 全过**——「pyinstaller 漏 modelscope hidden-import」这一最大未知已排除（`--collect-all modelscope` 就够了，一个 hidden-import 都不用补）。
 - **拿 exe**：GitHub → Actions → 最新绿色 run → Artifacts → `ModelScopeDownloader-exe`（zip ~33MB，保留 90 天）。每次 push main 自动重新构建。
 - **CI 首轮曾失败**，病因不是打包而是**中文输出在非 UTF-8 控制台崩**（cp1252 管道 print 中文 → `UnicodeEncodeError`，英文 Windows 也会炸）。已修：`app.py` `_harden_stdio()`（`errors="replace"`），本机 ascii 控制台复现+验证。CI 失败现在会**自动开公开 issue 附冒烟日志**（本机无 admin token 拉不了 Actions 日志，这是排错通道）。
