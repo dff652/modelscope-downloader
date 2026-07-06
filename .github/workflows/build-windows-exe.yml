@@ -99,7 +99,11 @@ jobs:
           本版本状态：CLI 已在 CI（真 Windows）端到端验证（真实下载 + 打包 + sha256 校验全过）；
           **GUI 尚未在真机点验**，故标记 pre-release。
           '@
-          gh release create $env:GITHUB_REF_NAME dist/ModelScopeDownloader.exe `
+          # 资产文件名带版本号（ModelScopeDownloader-v0.3.0.exe）：
+          # 操作员机上多版本并存时可分辨；GUI 标题栏也显示版本，双保险
+          $asset = "dist\ModelScopeDownloader-$env:GITHUB_REF_NAME.exe"
+          Copy-Item dist\ModelScopeDownloader.exe $asset
+          gh release create $env:GITHUB_REF_NAME $asset `
             --prerelease `
             --title "ModelScope Downloader $env:GITHUB_REF_NAME" `
             --notes $notes
