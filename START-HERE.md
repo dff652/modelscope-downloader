@@ -3,7 +3,15 @@
 > 接手「这个独立 Win10 工具（双击 exe 下 ModelScope 模型，给 air-gapped 部署传模型用）」的开发会话，**先读这页**。
 > 2026-06-24 起。独立项目（`/home/dff652/my_project/modelscope-downloader/`；已 `git init`，3 次提交，默认分支 `main`，GitHub `origin` 已 **push 成功**，远端 `main = e3278d1`），**从 ts-platform 的 `scripts/tools/modelscope-download/`（CLI 版）拆出独立化**，目标是给**非技术操作员**的双击 GUI exe。
 
-## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-06-24
+## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-07-06
+
+- ✅ **exe 已产出并通过真 Windows 冒烟（路线 C：GitHub Actions）**。v0.2.1，commit `9bffadb`。workflow `.github/workflows/build-windows-exe.yml` 在 `windows-latest` 上：PyInstaller 打窗口版 exe + console 冒烟版 → `--help` → **真下 `Qwen/Qwen3-0.6B` 的 `*.json` + `--tar` + `Get-FileHash` 复核 sha256 全过**——「pyinstaller 漏 modelscope hidden-import」这一最大未知已排除（`--collect-all modelscope` 就够了，一个 hidden-import 都不用补）。
+- **拿 exe**：GitHub → Actions → 最新绿色 run → Artifacts → `ModelScopeDownloader-exe`（zip ~33MB，保留 90 天）。每次 push main 自动重新构建。
+- **CI 首轮曾失败**，病因不是打包而是**中文输出在非 UTF-8 控制台崩**（cp1252 管道 print 中文 → `UnicodeEncodeError`，英文 Windows 也会炸）。已修：`app.py` `_harden_stdio()`（`errors="replace"`），本机 ascii 控制台复现+验证。CI 失败现在会**自动开公开 issue 附冒烟日志**（本机无 admin token 拉不了 Actions 日志，这是排错通道）。
+- **唯一残余未验项：GUI 没在真 Windows 上点过**（tkinter 窗口/弹窗/浏览文件夹）。CLI 路径已被 CI 端到端实证，GUI 与之共享全部 import 和下载逻辑，风险低但要真机双击一次才算闭环。
+- 下面 06-24 的快照保留作历史。
+
+## 历史快照 — 截至 2026-06-24
 
 - **代码**：v0.2.0，core/CLI/GUI/一键打包(`make_archive`)/`build.bat` 都写好。**本机 Linux 能验的都验了**（`make_archive` 端到端 tar+sha256、CLI、GUI 用 mock tkinter 构造无 `NameError`）。细节见「现状」。
 - **仓库**：分支 `main`；commit `e3278d1`（v0.2.0 主体 + docs 修正）。GitHub `origin` 已 **push 成功**（2026-06-24，用本机 `~/.ssh/id_ed25519` 走 SSH——origin 已从 HTTPS 改为 `git@github.com:dff652/modelscope-downloader.git`；该 key 已绑 `dff652` 账号，SSH `-T` 验证通过）。远端 `main = e3278d1`，本地已设上游跟踪。
