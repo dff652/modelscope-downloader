@@ -9,10 +9,11 @@ name: build-windows-exe
 on:
   push:
     branches: [main]
+    tags: ["v*"]  # 打 tag → 构建+冒烟全过后自动发 Release（exe 公开永久免登录下载）
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write  # tag 构建要发 Release；分支构建只用到 read
   issues: write
 
 jobs:
@@ -67,6 +68,28 @@ jobs:
           name: ModelScopeDownloader-exe
           path: dist/ModelScopeDownloader.exe
           if-no-files-found: error
+
+      - name: Release (tag builds only, after all smoke gates passed)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @'
+          Windows 双击即用的 ModelScope 模型下载工具（air-gapped 部署传模型用）。
+
+          **下载下方 Assets 里的 `ModelScopeDownloader.exe` 即可**，无需安装 Python。
+
+          - 双击打开 GUI：填模型 id → 选文件夹 → 下载 → 下完可一键打包 `.tar` + `.sha256`
+          - 首次运行 Windows SmartScreen 可能拦截：点「更多信息」→「仍要运行」
+          - 操作步骤详见仓库根目录的 `操作员须知.txt`；命令行用法见 README
+
+          本版本状态：CLI 已在 CI（真 Windows）端到端验证（真实下载 + 打包 + sha256 校验全过）；
+          **GUI 尚未在真机点验**，故标记 pre-release。
+          '@
+          gh release create $env:GITHUB_REF_NAME dist/ModelScopeDownloader.exe `
+            --prerelease `
+            --title "ModelScope Downloader $env:GITHUB_REF_NAME" `
+            --notes $notes
 
       - name: Post failure logs as issue (repo has no other readable log channel)
         if: failure()
