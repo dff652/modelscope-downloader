@@ -35,8 +35,37 @@ jobs:
           python -m pip install -U pip
           python -m pip install --default-timeout 120 --retries 5 -U pyinstaller modelscope
 
+      - name: Generate Windows version resource (作者/版本/项目地址进 exe 属性)
+        shell: python
+        run: |
+          import re, pathlib
+          src = pathlib.Path("app.py").read_text(encoding="utf-8")
+          ver = re.search(r'APP_VERSION = "([^"]+)"', src).group(1)
+          author = re.search(r'APP_AUTHOR = "([^"]+)"', src).group(1)
+          url = re.search(r'APP_URL = "([^"]+)"', src).group(1)
+          nums = (list(map(int, ver.split("."))) + [0, 0, 0, 0])[:4]
+          info = f"""VSVersionInfo(
+            ffi=FixedFileInfo(filevers={tuple(nums)}, prodvers={tuple(nums)},
+                              mask=0x3F, flags=0x0, OS=0x40004, fileType=0x1,
+                              subtype=0x0, date=(0, 0)),
+            kids=[
+              StringFileInfo([StringTable("080404b0", [
+                StringStruct("CompanyName", "{author}"),
+                StringStruct("FileDescription", "ModelScope 模型下载工具（air-gapped 部署传模型用）"),
+                StringStruct("FileVersion", "{ver}"),
+                StringStruct("ProductName", "ModelScope Downloader"),
+                StringStruct("ProductVersion", "{ver}"),
+                StringStruct("LegalCopyright", "MIT License, {author}"),
+                StringStruct("Comments", "{url}"),
+              ])]),
+              VarFileInfo([VarStruct("Translation", [2052, 1200])]),
+            ])
+          """
+          pathlib.Path("version_info.txt").write_text(info, encoding="utf-8")
+          print(f"version_info.txt generated: v{ver} by {author}")
+
       - name: Build windowed exe (operator build, same flags as build.bat)
-        run: python -m PyInstaller --onefile --windowed --name ModelScopeDownloader --collect-all modelscope app.py
+        run: python -m PyInstaller --onefile --windowed --name ModelScopeDownloader --collect-all modelscope --version-file version_info.txt app.py
 
       - name: Build console smoketest exe
         run: python -m PyInstaller --onefile --console --name smoketest --collect-all modelscope app.py

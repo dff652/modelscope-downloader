@@ -15,7 +15,9 @@ import threading
 import time
 
 APP_TITLE = "ModelScope Downloader"
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
+APP_AUTHOR = "dff652"
+APP_URL = "https://github.com/dff652/modelscope-downloader"
 
 
 def _harden_stdio():
@@ -228,7 +230,8 @@ def make_archive(src_dir, log=print):
 # ───────────────────────────── CLI ─────────────────────────────
 def run_cli(argv):
     ap = argparse.ArgumentParser(prog="modelscope-downloader",
-                                 description="ModelScope 模型下载（断点续传）")
+                                 description="ModelScope 模型下载（断点续传）",
+                                 epilog=f"v{APP_VERSION} · 作者 {APP_AUTHOR} · {APP_URL}")
     ap.add_argument("--model", required=True, help="模型 id，如 Qwen/Qwen3-0.6B")
     ap.add_argument("--out", required=True, help="本地目标目录（建议短路径）")
     ap.add_argument("--include", nargs="*", default=None, help="只下匹配 glob")
@@ -357,6 +360,19 @@ def run_gui():
     log_widget.grid(row=9, column=0, columnspan=2, sticky="nsew")
     frm.rowconfigure(9, weight=1)
     frm.columnconfigure(0, weight=1)
+
+    about = ttk.Label(frm, text=f"v{APP_VERSION} · 作者 {APP_AUTHOR} · {APP_URL}（点击打开，问题/建议提 Issue）",
+                      foreground="#06c", cursor="hand2")
+    about.grid(row=10, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+    def open_repo(_event=None):
+        import webbrowser
+        try:
+            webbrowser.open(APP_URL)
+        except Exception:  # noqa: BLE001 — 打不开浏览器就算了，地址就在字面上
+            pass
+
+    about.bind("<Button-1>", open_repo)
 
     def log_ui(text):
         log_widget.insert("end", text if text.endswith("\n") else text + "\n")
