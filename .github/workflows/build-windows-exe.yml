@@ -2,6 +2,8 @@
 # 产物：Actions 页面 → 本次运行 → Artifacts → ModelScopeDownloader-exe
 # 冒烟：额外打一个 console 版 smoketest.exe，跑 --help + 真下一个小模型的 *.json + --tar，
 #       验证 PyInstaller 没漏 modelscope 的动态 import（--windowed 版无法在 CI 里跑，import 集合与 console 版相同）。
+# 失败排错：冒烟输出 tee 进 smoke*.log；任何失败自动开 issue 附日志尾部
+#       （本机无 admin token 下载不了 Actions 日志，issue 公开可读——这是拿到真实报错的通道）。
 name: build-windows-exe
 
 on:
@@ -9,10 +11,16 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -33,12 +41,16 @@ jobs:
         run: python -m PyInstaller --onefile --console --name smoketest --collect-all modelscope app.py
 
       - name: "Smoke 1: exe boots, argparse works"
-        run: .\dist\smoketest.exe --help
+        run: |
+          Get-ChildItem dist | Out-File smoke1.log -Encoding utf8
+          & .\dist\smoketest.exe --help 2>&1 | Tee-Object -Append -FilePath smoke1.log
+          exit $LASTEXITCODE
 
       - name: "Smoke 2: real download (json only) + tar + sha256"
         timeout-minutes: 10
         run: |
-          .\dist\smoketest.exe --model Qwen/Qwen3-0.6B --out smoke_out\qwen --include "*.json" --tar
+          & .\dist\smoketest.exe --model Qwen/Qwen3-0.6B --out smoke_out\qwen --include "*.json" --tar 2>&1 | Tee-Object -FilePath smoke2.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path smoke_out\qwen\config.json)) { throw "download failed: no config.json" }
           if (-not (Test-Path smoke_out\qwen.tar)) { throw "no tar produced" }
           if (-not (Test-Path smoke_out\qwen.tar.sha256)) { throw "no sha256 produced" }
@@ -55,3 +67,25 @@ jobs:
           name: ModelScopeDownloader-exe
           path: dist/ModelScopeDownloader.exe
           if-no-files-found: error
+
+      - name: Post failure logs as issue (repo has no other readable log channel)
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = `CI failure: run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}), commit ${context.sha.slice(0,7)}\n\n`;
+            for (const f of ['smoke1.log', 'smoke2.log']) {
+              if (fs.existsSync(f)) {
+                const t = fs.readFileSync(f, 'utf8');
+                body += `### ${f}\n\`\`\`\n${t.slice(-6000)}\n\`\`\`\n`;
+              } else {
+                body += `### ${f}\n(not created — failed before this step)\n`;
+              }
+            }
+            await github.rest.issues.create({
+              ...context.repo,
+              title: `CI failure: build-windows-exe run ${context.runId}`,
+              labels: ['ci-failure'],
+              body,
+            });

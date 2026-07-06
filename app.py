@@ -15,7 +15,21 @@ import threading
 import time
 
 APP_TITLE = "ModelScope Downloader"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
+
+
+def _harden_stdio():
+    """中文输出防崩：stdout/stderr 编不出的字符改打 '?'，不抛 UnicodeEncodeError。
+
+    场景：CLI 输出全是中文，但控制台/管道编码不一定认中文
+    （如英文 Windows 的 cp1252、CI 的重定向管道）——不加固则 print 直接崩。
+    """
+    for s in (sys.stdout, sys.stderr):
+        try:
+            if s is not None and hasattr(s, "reconfigure"):
+                s.reconfigure(errors="replace")
+        except Exception:  # noqa: BLE001 — 加固失败就保持原样，别反过来弄崩程序
+            pass
 
 # 常用模型预设（GUI 下拉 / 提示用）
 PRESETS = [
@@ -349,6 +363,7 @@ def run_gui():
 
 
 def main():
+    _harden_stdio()
     # 有参数 → CLI；无参数（双击 exe）→ GUI
     if len(sys.argv) > 1:
         run_cli(sys.argv[1:])
