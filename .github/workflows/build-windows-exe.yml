@@ -1,0 +1,57 @@
+# 路线 C：在 GitHub Actions 的真 Windows 上出 exe（本机 Linux 打不了 PyInstaller Windows 包）。
+# 产物：Actions 页面 → 本次运行 → Artifacts → ModelScopeDownloader-exe
+# 冒烟：额外打一个 console 版 smoketest.exe，跑 --help + 真下一个小模型的 *.json + --tar，
+#       验证 PyInstaller 没漏 modelscope 的动态 import（--windowed 版无法在 CI 里跑，import 集合与 console 版相同）。
+name: build-windows-exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Install deps (pyinstaller + modelscope hub-only)
+        run: |
+          python -m pip install -U pip
+          python -m pip install --default-timeout 120 --retries 5 -U pyinstaller modelscope
+
+      - name: Build windowed exe (operator build, same flags as build.bat)
+        run: python -m PyInstaller --onefile --windowed --name ModelScopeDownloader --collect-all modelscope app.py
+
+      - name: Build console smoketest exe
+        run: python -m PyInstaller --onefile --console --name smoketest --collect-all modelscope app.py
+
+      - name: "Smoke 1: exe boots, argparse works"
+        run: .\dist\smoketest.exe --help
+
+      - name: "Smoke 2: real download (json only) + tar + sha256"
+        timeout-minutes: 10
+        run: |
+          .\dist\smoketest.exe --model Qwen/Qwen3-0.6B --out smoke_out\qwen --include "*.json" --tar
+          if (-not (Test-Path smoke_out\qwen\config.json)) { throw "download failed: no config.json" }
+          if (-not (Test-Path smoke_out\qwen.tar)) { throw "no tar produced" }
+          if (-not (Test-Path smoke_out\qwen.tar.sha256)) { throw "no sha256 produced" }
+          $expected = (Get-Content smoke_out\qwen.tar.sha256 -Raw).Split(" ")[0].Trim()
+          $actual = (Get-FileHash smoke_out\qwen.tar -Algorithm SHA256).Hash.ToLower()
+          if ($expected -ne $actual) { throw "sha256 mismatch: file=$expected computed=$actual" }
+          Write-Host "[ok] download + tar + sha256 all verified"
+
+      - name: Report exe size
+        run: Get-Item dist\ModelScopeDownloader.exe | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ModelScopeDownloader-exe
+          path: dist/ModelScopeDownloader.exe
+          if-no-files-found: error
