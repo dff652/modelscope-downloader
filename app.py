@@ -15,7 +15,7 @@ import threading
 import time
 
 APP_TITLE = "ModelScope Downloader"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 
 
 def _harden_stdio():
@@ -62,6 +62,52 @@ def dir_size(p):
             except OSError:
                 pass
     return total
+
+
+def expected_total(model, include=None, exclude=None, revision=None):
+    """查模型清单 → (总字节数, 文件数)；任何失败返回 None（进度显示降级，不影响下载）。
+
+    用于：真百分比/ETA + 下载前磁盘空间预检。include/exclude 用 fnmatch
+    近似 modelscope 的 allow/ignore 语义（扩展名类 glob 足够准）。
+    """
+    import fnmatch
+    try:
+        from modelscope.hub.api import HubApi
+        api = HubApi()
+        # 部分版本的 get_model_files 不收 revision —— 有就传，没有就查默认分支
+        # （清单只用于进度显示/磁盘预检，分支差异可容忍）
+        import inspect
+        kw = {"recursive": True}
+        if revision and "revision" in inspect.signature(api.get_model_files).parameters:
+            kw["revision"] = revision
+        files = api.get_model_files(model, **kw)
+        total, n = 0, 0
+        for f in files:
+            path = f.get("Path") or f.get("Name") or ""
+            size = f.get("Size") or 0
+            if f.get("Type") == "tree" or not path:
+                continue
+            if include and not any(fnmatch.fnmatch(path, p) for p in include):
+                continue
+            if exclude and any(fnmatch.fnmatch(path, p) for p in exclude):
+                continue
+            total += size
+            n += 1
+        return (total, n) if n else None
+    except Exception:  # noqa: BLE001 — 清单查不到就不显示百分比，下载照常
+        return None
+
+
+def free_disk(path):
+    """path 所在盘的剩余字节数；失败返回 None。"""
+    import shutil
+    try:
+        probe = path
+        while probe and not os.path.exists(probe):
+            probe = os.path.dirname(probe)
+        return shutil.disk_usage(probe or ".").free
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def download(model, out, revision=None, include=None, exclude=None,
@@ -198,10 +244,42 @@ def run_cli(argv):
     exclude = list(a.exclude) if a.exclude else []
     if a.skip_media:
         exclude += MEDIA_EXCLUDE
+    info = expected_total(a.model, include=a.include, exclude=(exclude or None),
+                          revision=a.revision)
+    if info:
+        total, n = info
+        print(f"[*] 清单：{n} 个文件，共 {human(total)}")
+        free = free_disk(a.out)
+        need = total * 2 if a.tar else total  # --tar 还要一份同等空间
+        if free is not None and free < need:
+            print(f"[!] 磁盘可能不够：需约 {human(need)}"
+                  f"{'（含打包）' if a.tar else ''}，剩 {human(free)} — 继续尝试…")
     download(a.model, a.out, revision=a.revision, include=a.include,
              exclude=(exclude or None), token=a.token, retries=a.retries)
     if a.tar:
         make_archive(a.out)
+
+
+def _self_cmd(cli_args):
+    """以 CLI 模式再跑一份自己（GUI 的下载子进程）。
+
+    子进程可被 kill → 这是 GUI「停止下载」的实现基础（snapshot_download
+    是阻塞库调用，线程内无法中途取消；.incomplete 文件保留，重下即续传）。
+    """
+    if getattr(sys, "frozen", False):  # pyinstaller exe
+        return [sys.executable] + cli_args
+    return [sys.executable, os.path.abspath(__file__)] + cli_args
+
+
+def _spawn_downloader(cli_args):
+    """起下载子进程：stdout/stderr 合流、UTF-8、Windows 下不弹黑窗。"""
+    import subprocess
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    return subprocess.Popen(
+        _self_cmd(cli_args),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 # ───────────────────────────── GUI ─────────────────────────────
@@ -244,18 +322,24 @@ def run_gui():
                     variable=skip_media_var).grid(row=5, column=0, columnspan=2,
                                                    sticky="w", pady=(6, 0))
 
+    progress_bar = ttk.Progressbar(frm, maximum=1000)
+    progress_bar.grid(row=6, column=0, columnspan=2, sticky="we", pady=(8, 2))
+
     status_var = tk.StringVar(value="就绪")
     status = ttk.Label(frm, textvariable=status_var, foreground="#0a0")
-    status.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 4))
+    status.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
     log_widget = scrolledtext.ScrolledText(frm, height=16, wrap="word")
-    log_widget.grid(row=8, column=0, columnspan=2, sticky="nsew")
-    frm.rowconfigure(8, weight=1)
+    log_widget.grid(row=9, column=0, columnspan=2, sticky="nsew")
+    frm.rowconfigure(9, weight=1)
     frm.columnconfigure(0, weight=1)
 
     def log_ui(text):
         log_widget.insert("end", text if text.endswith("\n") else text + "\n")
         log_widget.see("end")
+
+    # 下载子进程状态（run_gui 闭包内共享；tkinter 单线程 UI，poll() 里统一消费）
+    state = {"proc": None, "stopped": False, "total": None}
 
     def do_download():
         model = model_var.get().strip()
@@ -267,30 +351,91 @@ def run_gui():
         target = os.path.join(out, model.split("/")[-1])
         exclude = MEDIA_EXCLUDE if skip_media_var.get() else None
         dl_btn.config(state="disabled")
-        status_var.set("下载中…（可最小化，完成会弹窗）")
+        stop_btn.config(state="normal")
+        state["stopped"] = False
+        state["total"] = None
+        progress_bar.config(value=0)
+        status_var.set("查询模型清单…")
+        status.config(foreground="#0a0")
 
         def worker():
-            stop = threading.Event()
+            # 1) 清单：总大小（百分比/ETA 用）+ 磁盘预检
+            info = expected_total(model, exclude=exclude)
+            if info:
+                total, n = info
+                q.put(("__TOTAL__", total))
+                q.put(f"[*] 清单：{n} 个文件，共 {human(total)}\n")
+                free = free_disk(out)
+                if free is not None and free < total:
+                    q.put(f"[!] 注意：磁盘剩 {human(free)}，不够 {human(total)}，"
+                          f"大概率会下到一半失败！建议停止并换大盘。\n")
+            else:
+                q.put("[!] 查不到模型清单（不影响下载，只是不显示百分比）\n")
 
-            def sizepoll():
-                while not stop.is_set():
-                    try:
-                        q.put(f"    已下载 {human(dir_size(target))}\n")
-                    except Exception:  # noqa: BLE001
-                        pass
-                    stop.wait(2.0)
+            # 清单查询期间用户可能已点「停止」
+            if state["stopped"]:
+                q.put(("__STOPPED__", target))
+                return
 
-            threading.Thread(target=sizepoll, daemon=True).start()
-            ok, err = True, None
+            # 2) 起下载子进程（可被「停止」kill；.incomplete 保留 → 重下即续传）
+            args = ["--model", model, "--out", target]
+            if exclude:
+                args += ["--skip-media"]
             try:
-                download(model, target, exclude=exclude, log=lambda m: q.put(m + "\n"))
+                proc = _spawn_downloader(args)
             except Exception as e:  # noqa: BLE001
-                ok, err = False, e
-            finally:
-                stop.set()
-            q.put(("__DONE__", ok, err, target))
+                q.put(("__DONE__", False, e, target))
+                return
+            state["proc"] = proc
+            q.put(("__STARTED__", target))
 
+            # 3) 转发子进程输出到日志框
+            tail = []
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if line.strip():
+                    tail = (tail + [line])[-8:]
+                    q.put(line + "\n")
+            rc = proc.wait()
+            state["proc"] = None
+            if state["stopped"]:
+                q.put(("__STOPPED__", target))
+            else:
+                err = None if rc == 0 else RuntimeError(
+                    "\n".join(tail) or f"下载进程退出码 {rc}")
+                q.put(("__DONE__", rc == 0, err, target))
+
+        def progresspoll():
+            # 父进程直接量目标目录（.incomplete 也在里面）→ 速度/百分比/ETA
+            prev_bytes, prev_t, speed = None, None, 0.0
+            while True:
+                time.sleep(1.0)
+                p = state["proc"]
+                if p is None or p.poll() is not None:
+                    break
+                cur = dir_size(target)
+                now = time.monotonic()
+                if prev_bytes is not None and now > prev_t:
+                    inst = max(0.0, (cur - prev_bytes) / (now - prev_t))
+                    speed = inst if speed == 0 else 0.7 * speed + 0.3 * inst
+                prev_bytes, prev_t = cur, now
+                q.put(("__PROG__", cur, speed))
+
+        def start_polling(*_):
+            threading.Thread(target=progresspoll, daemon=True).start()
+
+        state["on_started"] = start_polling
         threading.Thread(target=worker, daemon=True).start()
+
+    def do_stop():
+        state["stopped"] = True  # proc 未起（还在查清单）也生效：worker 会检查
+        stop_btn.config(state="disabled")
+        p = state["proc"]
+        if p is not None:
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
     def start_tar(target):
         """下完后弹问要不要打 tar；点「是」走这里（worker 线程，免冻 UI）。"""
@@ -308,17 +453,51 @@ def run_gui():
         threading.Thread(target=worker, daemon=True).start()
 
     dl_btn = ttk.Button(frm, text="下载 / Download", command=do_download)
-    dl_btn.grid(row=7, column=0, columnspan=2, sticky="we", pady=(0, 6))
+    dl_btn.grid(row=8, column=0, sticky="we", pady=(0, 6))
+    stop_btn = ttk.Button(frm, text="停止", command=do_stop, state="disabled")
+    stop_btn.grid(row=8, column=1, sticky="we", padx=(6, 0), pady=(0, 6))
 
     def poll():
         import queue as _q
         try:
             while True:
                 item = q.get_nowait()
-                if isinstance(item, tuple) and item and item[0] == "__DONE__":
+                if isinstance(item, tuple) and item and item[0] == "__TOTAL__":
+                    state["total"] = item[1]
+                elif isinstance(item, tuple) and item and item[0] == "__STARTED__":
+                    status_var.set("下载中…（可最小化；「停止」后重下即续传）")
+                    if state.get("on_started"):
+                        state["on_started"]()
+                elif isinstance(item, tuple) and item and item[0] == "__PROG__":
+                    _, cur, speed = item
+                    total = state["total"]
+                    txt = f"已下载 {human(cur)}"
+                    if total:
+                        pct = min(100.0, cur * 100.0 / total)
+                        progress_bar.config(value=pct * 10)
+                        txt += f" / {human(total)}（{pct:.1f}%）"
+                        if speed > 1:
+                            remain = max(0, total - cur) / speed
+                            m, s = divmod(int(remain), 60)
+                            h, m = divmod(m, 60)
+                            eta = f"{h}小时{m:02d}分" if h else (f"{m}分{s:02d}秒" if m else f"{s}秒")
+                            txt += f"  剩余约 {eta}"
+                    if speed > 1:
+                        txt += f"  —  {human(speed)}/s"
+                    status_var.set(txt)
+                elif isinstance(item, tuple) and item and item[0] == "__STOPPED__":
+                    _, target = item
+                    dl_btn.config(state="normal")
+                    stop_btn.config(state="disabled")
+                    status_var.set("已停止 — 再点「下载」从断点继续")
+                    status.config(foreground="#c60")
+                    log_ui(f"[!] 已停止。已下载的部分保留在 {target}，重下同一模型即续传。")
+                elif isinstance(item, tuple) and item and item[0] == "__DONE__":
                     _, ok, err, target = item
                     dl_btn.config(state="normal")
+                    stop_btn.config(state="disabled")
                     if ok:
+                        progress_bar.config(value=1000)
                         status_var.set("完成 ✓")
                         status.config(foreground="#0a0")
                         if messagebox.askyesno(
@@ -356,6 +535,21 @@ def run_gui():
             pass
         root.after(150, poll)
 
+    def on_close():
+        p = state["proc"]
+        if p is not None and p.poll() is None:
+            if not messagebox.askokcancel(
+                    APP_TITLE, "正在下载。关闭会停止下载（已下载部分保留，"
+                    "下次重下同一模型即续传）。确定关闭？"):
+                return
+            state["stopped"] = True
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     log_ui(f"{APP_TITLE} v{APP_VERSION} — 填模型 id、选文件夹、点下载。")
     log_ui("常用：" + "  ".join(f"{i}={d}" for i, (m, d) in zip([p[0] for p in PRESETS], PRESETS)))
     root.after(150, poll)

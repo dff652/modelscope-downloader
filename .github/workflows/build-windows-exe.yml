@@ -60,6 +60,19 @@ jobs:
           if ($expected -ne $actual) { throw "sha256 mismatch: file=$expected computed=$actual" }
           Write-Host "[ok] download + tar + sha256 all verified"
 
+      - name: "Smoke 3: windowed exe CLI path (= GUI 的下载子进程模式)"
+        timeout-minutes: 10
+        run: |
+          $p = Start-Process -FilePath .\dist\ModelScopeDownloader.exe `
+            -ArgumentList '--model','Qwen/Qwen3-0.6B','--out','smoke_win\q','--include','*.json' `
+            -RedirectStandardOutput smoke3.log -RedirectStandardError smoke3.err.log `
+            -PassThru -Wait -NoNewWindow
+          if ($p.ExitCode -ne 0) { Get-Content smoke3.log, smoke3.err.log; throw "windowed CLI exit code $($p.ExitCode)" }
+          if (-not (Test-Path smoke_win\q\config.json)) { throw "windowed CLI: no config.json downloaded" }
+          $out = (Get-Content smoke3.log -Raw -ErrorAction SilentlyContinue)
+          if ([string]::IsNullOrWhiteSpace($out)) { Write-Warning "windowed exe piped stdout is EMPTY (GUI log box would be blank)" }
+          Write-Host "[ok] windowed exe CLI + piped stdout verified"
+
       - name: Report exe size
         run: Get-Item dist\ModelScopeDownloader.exe | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
 
@@ -98,7 +111,7 @@ jobs:
           script: |
             const fs = require('fs');
             let body = `CI failure: run [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}), commit ${context.sha.slice(0,7)}\n\n`;
-            for (const f of ['smoke1.log', 'smoke2.log']) {
+            for (const f of ['smoke1.log', 'smoke2.log', 'smoke3.log', 'smoke3.err.log']) {
               if (fs.existsSync(f)) {
                 const t = fs.readFileSync(f, 'utf8');
                 body += `### ${f}\n\`\`\`\n${t.slice(-6000)}\n\`\`\`\n`;
