@@ -3,7 +3,16 @@
 > 接手「这个独立 Win10 工具（双击 exe 下 ModelScope 模型，给 air-gapped 部署传模型用）」的开发会话，**先读这页**。
 > 2026-06-24 起。独立项目（`/home/dff652/my_project/modelscope-downloader/`；已 `git init`，3 次提交，默认分支 `main`，GitHub `origin` 已 **push 成功**，远端 `main = e3278d1`），**从 ts-platform 的 `scripts/tools/modelscope-download/`（CLI 版）拆出独立化**，目标是给**非技术操作员**的双击 GUI exe。
 
-## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-07-06
+## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-08-17
+
+### 2026-08-17 真机偶发 `_tcl_data` 缺失（v0.3.2）
+
+- 用户在 Win10 GUI 下载 `Eco-Tech/Qwen3.8-27B-w8a8` 时，GUI 启动的 CLI 子进程偶发崩在 PyInstaller `pyi_rth__tkinter`：`FileNotFoundError: Tcl data directory 'C:\Users\user\AppData\Local\Temp\_MEI...\_tcl_data' not found`。异常发生在 ModelScope 下载代码之前，不是模型 ID、网络或磁盘错误。
+- 关闭整个工具后重新打开即恢复；新进程重新解包出 `%TEMP%\_MEI...`，随后正常进入 Hub 下载。ModelScope 实时 API 确认该模型存在，清单为 26 个文件、32,152,070,926 bytes（29.94 GiB），与 GUI 显示的 29.9 GB 一致。
+- 已确认 v0.3.2 Release EXE 内含 `_tcl_data` 文件，故排除“构建时根本没打包 Tcl/Tk”。可确认的直接原因是当次 `_MEI` 临时资源目录在子进程启动时不可用；“临时解包偶发不完整、被 Defender/清理软件移除，或 one-file 父子进程复用状态异常”仍是候选解释，尚无足够证据区分，不写成已证实根因。
+- 代码触发点：GUI 通过 `_spawn_downloader()` 以 `sys.executable` 再启动同一个 one-file EXE，并继承当前环境。PyInstaller 6.9+ 对“同一 EXE 启动子进程”默认复用已解包资源；官方提供 `PYINSTALLER_RESET_ENVIRONMENT=1` 强制按新实例重新解包。
+- **尚未实施的修复候选**：frozen 子进程增加 `PYINSTALLER_RESET_ENVIRONMENT=1`；固定 PyInstaller 构建版本；增加“真正的 GUI 父 EXE 再启动 CLI 子 EXE” Windows 冒烟。当前 Smoke 3 只是从 PowerShell 直接带 CLI 参数启动 windowed EXE，**没有覆盖嵌套自启动路径**。
+- **当前操作员恢复方式**：偶发一次时关闭所有工具窗口后重开；若反复发生，再查 Defender 隔离记录、临时目录清理软件和当次 `_MEI` 目录，不建议粗暴清空整个 `%TEMP%`。
 
 ### v0.3.2（同日第四轮）
 
@@ -26,7 +35,7 @@
 - ✅ **v0.3.0 全部做完**（commit `75a2167`，tag `v0.3.0`）：进度条+百分比+网速(EMA)+ETA；「停止」按钮（GUI 下载改**子进程**——`_spawn_downloader` 以 CLI 模式重跑自身，kill 即停，`.incomplete` 保留续传）；`expected_total()` 拿清单总大小 → 真百分比 + **磁盘空间预检**；关窗确认杀子进程；日志不再 2s 刷屏。
 - **0.0B 之谜已实证**：断点文件（`.incomplete`）就写在目标目录，轮询没错；0.0B 只是「取清单+连接」阶段（本机真下载探针确认，t=3s 起就有字节）。
 - **API 坑**：`HubApi.get_model_files(model, recursive=True)` **不收 `revision`**（modelscope 1.38 / LegacyHubApi），expected_total 里已做签名探测。modelscope 1.38 实现已拆到 `modelscope_hub` 包，`--collect-all modelscope` 在 CI 仍打得全。
-- CI 加 **Smoke 3**：windowed exe 用管道跑 CLI（= GUI 子进程模式）真下载——绿。
+- CI 加 **Smoke 3**：windowed exe 用管道跑 CLI 真下载——绿；但 2026-08-17 已确认它只覆盖 windowed EXE 的 CLI 路径，未覆盖 GUI 父 EXE 再启动同一 EXE 子进程的嵌套路径。
 - 剩余小项：真机确认 v0.3.0 GUI 的进度/停止体验；icon.ico；（远期）文件级进度、限速。
 
 ### v0.2.x（同日第一轮）
@@ -101,7 +110,7 @@
 
 ### 本会话固化的工程机制
 
-- **CI（`build-windows-exe.yml`）**：push main → 真 Windows 构建 + 三重冒烟（console `--help`；console 真下载+tar+sha256 复核；**windowed exe 管道跑 CLI**=GUI 子进程模式）→ exe 挂 Artifacts（90天/需登录）。失败自动开 issue 带日志。
+- **CI（`build-windows-exe.yml`）**：push main → 真 Windows 构建 + 三重冒烟（console `--help`；console 真下载+tar+sha256 复核；windowed exe 管道跑 CLI）→ exe 挂 Artifacts（90天/需登录）。失败自动开 issue 带日志。第三项只验 windowed CLI，不等于完整 GUI→子 EXE 嵌套路径（见 2026-08-17 记录）。
 - **发版**：打 `v*` tag → 同套关卡全过才发 Release（公开/永久/免登录），资产名 `ModelScopeDownloader-vX.Y.Z.exe`（自 v0.3.1）。GUI 标题栏也显示版本，双保险。
 - **测试基线（本机 Linux 能跑的）**：`py_compile`；CLI 真下载（venv + `--include "*.json"` 秒级完成）；`_spawn_downloader` 子进程真下载；mock tkinter 构造；过滤器/清单单测。
 

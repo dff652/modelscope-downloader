@@ -48,6 +48,7 @@ python app.py --model Qwen/Qwen3-0.6B --out ./models/Qwen3-0.6B --skip-media --t
 | 现象 | 解决 |
 |---|---|
 | 断网 / 中断 | 重新下载同一模型即从断点续传 |
+| 点下载后弹出 `pyi_rth__tkinter` / `_tcl_data not found` | 这是 EXE 临时解包资源异常，尚未进入模型下载。关闭所有 ModelScope Downloader 窗口后重新打开；若反复出现，检查 Defender 隔离记录和临时目录清理软件，并将完整弹窗截图发给开发者 |
 | 盘满 | 换大盘；300G 模型放 NTFS ≥350G |
 | 长路径报错 | 保存目录用**短路径**（如 `D:\m\xxx`） |
 | `model not found` / 404 | 核对 model id（区分大小写；有的没 `-Instruct` 后缀） |
