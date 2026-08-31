@@ -55,6 +55,14 @@ def human(n):
     return f"{n:.1f}PB"
 
 
+def batch_bytes_from_gb(value):
+    """把 GUI/CLI 的 GB 输入安全转换为字节。"""
+    import math
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("每批上限必须是大于 0 的有限数字")
+    return max(1, int(value * 1024 ** 3))
+
+
 def dir_size(p):
     total = 0
     for root, _, files in os.walk(p):
@@ -299,6 +307,12 @@ def write_offline_batch_artifacts(model_root, batch_dir, model, revision,
 
     model_name = model.split("/")[-1]
     batch_name = f"batch-{batch_number:03d}"
+    checksum_names = [f"_OFFLINE-SHA256SUMS.batch-{index:03d}"
+                      for index in range(1, len(batches) + 1)]
+    linux_checksums = " ".join(
+        f".offline-batches/{name}" for name in checksum_names)
+    windows_checksums = ",\n    ".join(
+        f"\"$root\\.offline-batches\\{name}\"" for name in checksum_names)
     instructions = f"""ModelScope Downloader 离线服务器操作说明
 
 本批：{batch_number}/{len(batches)}（{batch_name}）
@@ -321,14 +335,20 @@ Windows 服务器（把 E: 和 D:\\models\\{model_name} 换成实际路径）：
 
 全部 {len(batches)} 批上传后，在 Linux 服务器执行：
   cd /srv/models/{model_name}
+  for f in {linux_checksums}; do test -f "$f" || {{ echo "缺少 $f"; exit 1; }}; done
   test "$(find .offline-batches -maxdepth 1 -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq {len(batches)}
-  python3 .offline-batches/_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-*
+  python3 .offline-batches/_OFFLINE-VERIFY.py . {linux_checksums}
 
 全部 {len(batches)} 批上传后，在 Windows PowerShell 执行：
   $root='D:\\models\\{model_name}'
-  $sums=@(Get-ChildItem "$root\\.offline-batches\\_OFFLINE-SHA256SUMS.batch-*")
-  if ($sums.Count -ne {len(batches)}) {{ throw "批次校验清单数量不对：$($sums.Count)/{len(batches)}" }}
-  python "$root\\.offline-batches\\_OFFLINE-VERIFY.py" $root $sums.FullName
+  $sums=@(
+    {windows_checksums}
+  )
+  $missing=@($sums | Where-Object {{ -not (Test-Path $_ -PathType Leaf) }})
+  if ($missing.Count) {{ throw "缺少批次校验清单：$($missing -join ', ')" }}
+  $actual=@(Get-ChildItem "$root\\.offline-batches\\_OFFLINE-SHA256SUMS.batch-*")
+  if ($actual.Count -ne {len(batches)}) {{ throw "批次校验清单数量不对：$($actual.Count)/{len(batches)}" }}
+  python "$root\\.offline-batches\\_OFFLINE-VERIFY.py" $root $sums
 
 最后确认模型目录中存在配置、tokenizer、权重 index（如有）及全部权重分片。
 只有全部批次校验通过后，才可删除下载机/移动盘上的批次。
@@ -508,8 +528,12 @@ def run_cli(argv):
         exclude += MEDIA_EXCLUDE
     if a.batch_number < 1:
         ap.error("--batch-number 必须从 1 开始")
-    if a.batch_size_gb is not None and a.batch_size_gb <= 0:
-        ap.error("--batch-size-gb 必须大于 0")
+    batch_bytes = None
+    if a.batch_size_gb is not None:
+        try:
+            batch_bytes = batch_bytes_from_gb(a.batch_size_gb)
+        except ValueError as e:
+            ap.error(str(e))
     if a.batch_size_gb is None and a.batch_number != 1:
         ap.error("使用 --batch-number 时必须同时提供 --batch-size-gb")
     if a.batch_size_gb is not None and a.tar:
@@ -518,9 +542,7 @@ def run_cli(argv):
     target = a.out
     selected_include = a.include
     batches = None
-    batch_bytes = None
     if a.batch_size_gb is not None:
-        batch_bytes = max(1, int(a.batch_size_gb * 1024 ** 3))
         try:
             batches, plan_path, created = load_or_create_batch_plan(
                 a.out, a.model, a.revision, a.include, (exclude or None),
@@ -741,7 +763,8 @@ def run_gui():
             try:
                 batch_size_gb = float(batch_size_text)
                 batch_number = int(batch_number_text)
-                if batch_size_gb <= 0 or batch_number < 1:
+                batch_bytes_from_gb(batch_size_gb)
+                if batch_number < 1:
                     raise ValueError
             except ValueError:
                 messagebox.showwarning(APP_TITLE, "每批上限必须大于 0，批次必须是从 1 开始的整数")
@@ -769,7 +792,7 @@ def run_gui():
             # 1) 清单：总大小（百分比/ETA 用）+ 磁盘预检
             args = ["--model", model, "--out", model_root if batch_enabled else target]
             if batch_enabled:
-                batch_bytes = max(1, int(batch_size_gb * 1024 ** 3))
+                batch_bytes = batch_bytes_from_gb(batch_size_gb)
                 try:
                     batches, plan_path, created = load_or_create_batch_plan(
                         model_root, model, None, None, exclude, batch_bytes)

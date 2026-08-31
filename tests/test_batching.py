@@ -11,6 +11,11 @@ import app
 
 
 class BatchPlanningTests(unittest.TestCase):
+    def test_invalid_batch_gb_values_are_rejected(self):
+        for value in (0, -1, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                app.batch_bytes_from_gb(value)
+
     def test_plan_batches_keeps_files_whole_and_deterministic(self):
         manifest = [
             {"path": "model-00002.safetensors", "size": 6},
@@ -93,6 +98,33 @@ class OfflineArtifactsTests(unittest.TestCase):
                 check=False, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("checked=2 failed=0", result.stdout)
+
+    def test_final_instructions_require_exact_batch_manifests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_root = os.path.join(tmp, "model")
+            batch_dir = os.path.join(model_root, "batch-001")
+            os.makedirs(batch_dir)
+            with open(os.path.join(batch_dir, "config.json"), "wb") as stream:
+                stream.write(b"{}")
+            batches = [
+                [{"path": "config.json", "size": 2}],
+                [{"path": "model.safetensors", "size": 10}],
+            ]
+
+            app.write_offline_batch_artifacts(
+                model_root, batch_dir, "owner/model", "v1", batches,
+                batch_number=1, batch_bytes=100, log=lambda _message: None)
+            with open(os.path.join(
+                    batch_dir, "_OFFLINE-SERVER-INSTRUCTIONS.txt"),
+                    encoding="utf-8") as stream:
+                instructions = stream.read()
+
+            self.assertIn(".offline-batches/_OFFLINE-SHA256SUMS.batch-001", instructions)
+            self.assertIn(".offline-batches/_OFFLINE-SHA256SUMS.batch-002", instructions)
+            self.assertIn("缺少批次校验清单", instructions)
+            self.assertNotIn(
+                "_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-*",
+                instructions)
 
     def test_unsafe_manifest_path_is_rejected(self):
         with self.assertRaises(ValueError):

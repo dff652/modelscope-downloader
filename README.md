@@ -106,21 +106,25 @@ python D:\models\<模型名>\.offline-batches\_OFFLINE-VERIFY.py D:\models\<模�
 
 每批的校验必须输出 `failed=0`。`robocopy` 的复制结果也要留意；校验失败、文件缺失或路径写错时不要删除介质上的批次。
 
-全部 N 批到齐后，Linux 服务器的最终校验形如：
+全部 N 批到齐后，Linux 服务器的最终校验形如（下面以 N=2 为例；工具生成的说明会枚举实际全部文件名）：
 
 ```bash
 cd /srv/models/<模型名>
-test "$(find .offline-batches -maxdepth 1 -type f -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq <总批数>
-python3 .offline-batches/_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-*
+for f in .offline-batches/_OFFLINE-SHA256SUMS.batch-001 .offline-batches/_OFFLINE-SHA256SUMS.batch-002; do test -f "$f" || { echo "缺少 $f"; exit 1; }; done
+test "$(find .offline-batches -maxdepth 1 -type f -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq 2
+python3 .offline-batches/_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-001 .offline-batches/_OFFLINE-SHA256SUMS.batch-002
 ```
 
-全部 N 批到齐后，Windows PowerShell 的最终校验形如：
+全部 N 批到齐后，Windows PowerShell 的最终校验形如（以 N=2 为例）：
 
 ```powershell
 $root='D:\models\<模型名>'
-$sums=@(Get-ChildItem "$root\.offline-batches\_OFFLINE-SHA256SUMS.batch-*")
-if ($sums.Count -ne <总批数>) { throw "批次校验清单数量不对：$($sums.Count)/<总批数>" }
-python "$root\.offline-batches\_OFFLINE-VERIFY.py" $root $sums.FullName
+$sums=@("$root\.offline-batches\_OFFLINE-SHA256SUMS.batch-001", "$root\.offline-batches\_OFFLINE-SHA256SUMS.batch-002")
+$missing=@($sums | Where-Object { -not (Test-Path $_ -PathType Leaf) })
+if ($missing.Count) { throw "缺少批次校验清单：$($missing -join ', ')" }
+$actual=@(Get-ChildItem "$root\.offline-batches\_OFFLINE-SHA256SUMS.batch-*")
+if ($actual.Count -ne 2) { throw "批次校验清单数量不对：$($actual.Count)/2" }
+python "$root\.offline-batches\_OFFLINE-VERIFY.py" $root $sums
 ```
 
 最终验收同时确认模型配置、tokenizer、权重 index（如有）及全部权重分片都在同一模型目录；只有最终命令输出 `failed=0` 后，才清理剩余搬运介质。

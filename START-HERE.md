@@ -13,7 +13,7 @@
 - 首次规划写入 `<模型名>/_OFFLINE-BATCH-PLAN.json`，锁定模型、revision、过滤条件、批大小、文件名/大小和可用远端 SHA256；后续批次必须复用同一保存目录和设置，避免跨天混入新版本。中断后重跑同一批仍使用断点续传。
 - 每批完成后生成 `_OFFLINE-SHA256SUMS.batch-NNN`、纯标准库 `_OFFLINE-VERIFY.py`、全批计划和 `_OFFLINE-SERVER-INSTRUCTIONS.txt`。说明文件包含 Linux `rsync`、Windows `robocopy` 的每批复制/校验命令，以及全部批次到齐后的总校验命令；校验器不联网。
 - CLI 对应参数：`--batch-size-gb N --batch-number K`；分批与 `--tar` 互斥。GUI 完成一批会自动把批次输入框切到下一批，但不会替用户删除任何文件。
-- 当前验证：`python3 -m py_compile app.py tests/test_batching.py`、`python3 -m unittest discover -s tests -v`（当前 11 项单测）和 `git diff --check` 已过；Windows workflow 已增加真实小模型分批下载 + 便携校验器 Smoke 4。发布候选必须以当前提交对应的 CI 运行结果为准，不能用本机通过替代 CI 证据。
+- 当前验证：`python3 -m py_compile app.py tests/test_batching.py`、`python3 -m unittest discover -s tests -v`（当前 13 项单测）和 `git diff --check` 已过；Windows workflow 已增加真实小模型分批下载 + 便携校验器 Smoke 4。发布候选必须以当前提交对应的 CI 运行结果为准，不能用本机通过替代 CI 证据。
 - Tcl 临时目录风险修复：v0.4.0 frozen 子进程已设置 `PYINSTALLER_RESET_ENVIRONMENT=1`，并把 Smoke 3 设计为真正的 GUI 父 EXE→CLI 子 EXE 路径；目前仍待 CI 和真 Windows 验证，不能把“已实施”写成“已证实有效”。
 - 真 Windows 边界：此前 v0.3.x 的 GUI 有过真机基线验证；v0.4.0 新增的批次控件、N/K 显示与自动切换、分批停止/续传、产物路径仍未在真 Windows GUI 中点验。Smoke 3 覆盖父 EXE→CLI 子 EXE 的自动化路径，Smoke 4 覆盖 console 分批下载/校验，但二者都不等于人工双击 GUI 验收。CI 四重 Smoke 通过后可以先发布 prerelease；稳定版/正式交付操作员前，必须补真 Windows 双击、布局、至少两批小模型、停止续传、逐批校验和最后总校验。
 
