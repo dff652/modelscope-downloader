@@ -15,7 +15,7 @@ import threading
 import time
 
 APP_TITLE = "ModelScope Downloader"
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.4.0"
 APP_AUTHOR = "dff652"
 APP_URL = "https://github.com/dff652/modelscope-downloader"
 
@@ -66,38 +66,293 @@ def dir_size(p):
     return total
 
 
-def expected_total(model, include=None, exclude=None, revision=None):
-    """查模型清单 → (总字节数, 文件数)；任何失败返回 None（进度显示降级，不影响下载）。
-
-    用于：真百分比/ETA + 下载前磁盘空间预检。include/exclude 用 fnmatch
-    近似 modelscope 的 allow/ignore 语义（扩展名类 glob 足够准）。
-    """
+def model_manifest(model, include=None, exclude=None, revision=None, token=None):
+    """查模型清单 → 文件字典列表；任何失败返回 None。"""
     import fnmatch
     try:
-        from modelscope.hub.api import HubApi
-        api = HubApi()
-        # 部分版本的 get_model_files 不收 revision —— 有就传，没有就查默认分支
-        # （清单只用于进度显示/磁盘预检，分支差异可容忍）
-        import inspect
-        kw = {"recursive": True}
-        if revision and "revision" in inspect.signature(api.get_model_files).parameters:
-            kw["revision"] = revision
-        files = api.get_model_files(model, **kw)
-        total, n = 0, 0
-        for f in files:
-            path = f.get("Path") or f.get("Name") or ""
-            size = f.get("Size") or 0
-            if f.get("Type") == "tree" or not path:
+        try:
+            # 新版公共 API 保留 revision 和 SHA256；分批计划优先用它锁定快照。
+            from modelscope_hub.api import HubApi as ModernHubApi
+            files = ModernHubApi(token=token).list_repo_files(
+                model, "model", revision=revision, recursive=True)
+            manifest = [{
+                "path": f.path,
+                "size": int(f.size or 0),
+                "sha256": f.sha256 or None,
+                "type": getattr(f, "type", "blob"),
+            } for f in files]
+        except (ImportError, AttributeError, TypeError):
+            # modelscope < 1.38 没有独立 modelscope_hub，保留旧 API 兼容。
+            from modelscope.hub.api import HubApi
+            api = HubApi()
+            if token:
+                api.login(token)
+            import inspect
+            kw = {"recursive": True}
+            if revision and "revision" in inspect.signature(api.get_model_files).parameters:
+                kw["revision"] = revision
+            files = api.get_model_files(model, **kw)
+            manifest = [{
+                "path": f.get("Path") or f.get("Name") or "",
+                "size": int(f.get("Size") or 0),
+                "sha256": f.get("Sha256") or f.get("sha256") or None,
+                "type": f.get("Type") or "blob",
+            } for f in files]
+
+        filtered = []
+        for item in manifest:
+            path = item["path"]
+            if item["type"] == "tree" or not path:
                 continue
             if include and not any(fnmatch.fnmatch(path, p) for p in include):
                 continue
             if exclude and any(fnmatch.fnmatch(path, p) for p in exclude):
                 continue
-            total += size
-            n += 1
-        return (total, n) if n else None
+            item.pop("type", None)
+            filtered.append(item)
+        return sorted(filtered, key=lambda item: item["path"]) or None
     except Exception:  # noqa: BLE001 — 清单查不到就不显示百分比，下载照常
         return None
+
+
+def expected_total(model, include=None, exclude=None, revision=None, token=None):
+    """查模型清单 → (总字节数, 文件数)；任何失败返回 None。"""
+    manifest = model_manifest(model, include=include, exclude=exclude,
+                              revision=revision, token=token)
+    if not manifest:
+        return None
+    return sum(item["size"] for item in manifest), len(manifest)
+
+
+def plan_batches(manifest, batch_bytes):
+    """按完整文件顺序分批；单文件超过上限时独占一批，不切割文件。"""
+    if batch_bytes <= 0:
+        raise ValueError("每批大小必须大于 0")
+    batches, current, current_size = [], [], 0
+    for item in sorted(manifest, key=lambda entry: entry["path"]):
+        size = item["size"]
+        if current and current_size + size > batch_bytes:
+            batches.append(current)
+            current, current_size = [], 0
+        current.append(item)
+        current_size += size
+        if size > batch_bytes:
+            batches.append(current)
+            current, current_size = [], 0
+    if current:
+        batches.append(current)
+    return batches
+
+
+def load_or_create_batch_plan(model_root, model, revision, include, exclude,
+                              batch_bytes, token=None):
+    """首批锁定文件清单；后续批次复用，避免跨天混入仓库新版本。"""
+    import json
+    plan_path = os.path.join(model_root, "_OFFLINE-BATCH-PLAN.json")
+    settings = {
+        "format_version": 1,
+        "model": model,
+        "revision": revision,
+        "include": list(include or []),
+        "exclude": list(exclude or []),
+        "batch_bytes": batch_bytes,
+    }
+    if os.path.isfile(plan_path):
+        with open(plan_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        for key, expected in settings.items():
+            if saved.get(key) != expected:
+                raise ValueError(
+                    f"已有批次计划与当前 {key} 不一致。为避免混合模型版本，"
+                    "请恢复原设置，或为新计划选择另一个保存目录。")
+        batches = saved.get("batches")
+        if not isinstance(batches, list) or not batches:
+            raise ValueError(f"批次计划损坏：{plan_path}")
+        return batches, plan_path, False
+
+    manifest = model_manifest(model, include=include, exclude=exclude,
+                              revision=revision, token=token)
+    if not manifest:
+        raise RuntimeError("无法取得模型文件清单，不能安全规划离线批次")
+    batches = plan_batches(manifest, batch_bytes)
+    os.makedirs(model_root, exist_ok=True)
+    payload = dict(settings, batches=batches)
+    temp_path = plan_path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(temp_path, plan_path)
+    return batches, plan_path, True
+
+
+def _safe_local_file(root, relative_path):
+    """把仓库内 POSIX 路径安全映射到本地批次目录。"""
+    from pathlib import PurePosixPath
+    rel = PurePosixPath(relative_path.replace("\\", "/"))
+    if rel.is_absolute() or ".." in rel.parts or (rel.parts and ":" in rel.parts[0]):
+        raise ValueError(f"不安全的模型文件路径：{relative_path}")
+    return os.path.join(root, *rel.parts)
+
+
+def _sha256_file(path):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+_OFFLINE_VERIFY_SCRIPT = r'''#!/usr/bin/env python3
+"""Verify offline model batches using only Python's standard library."""
+import hashlib
+from pathlib import Path, PurePosixPath
+import sys
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(8 * 1024 * 1024)
+            if not chunk:
+                return value.hexdigest()
+            value.update(chunk)
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("usage: python _OFFLINE-VERIFY.py <model-dir> <SHA256SUMS> [...]", file=sys.stderr)
+        return 2
+    root = Path(sys.argv[1])
+    checked = failed = 0
+    for manifest_name in sys.argv[2:]:
+        manifest = Path(manifest_name)
+        for raw in manifest.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            expected, rel_text = raw.split("  ", 1)
+            rel = PurePosixPath(rel_text)
+            if rel.is_absolute() or ".." in rel.parts or (rel.parts and ":" in rel.parts[0]):
+                print(f"[x] unsafe path: {rel_text}")
+                failed += 1
+                continue
+            path = root.joinpath(*rel.parts)
+            checked += 1
+            if not path.is_file():
+                print(f"[x] missing: {rel_text}")
+                failed += 1
+            elif digest(path) != expected:
+                print(f"[x] mismatch: {rel_text}")
+                failed += 1
+            else:
+                print(f"[ok] {rel_text}")
+    print(f"checked={checked} failed={failed}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def write_offline_batch_artifacts(model_root, batch_dir, model, revision,
+                                  batches, batch_number, batch_bytes, log=print):
+    """为一个已完成批次生成校验清单、总计划和离线服务器操作说明。"""
+    os.makedirs(model_root, exist_ok=True)
+    os.makedirs(batch_dir, exist_ok=True)
+    selected = batches[batch_number - 1]
+    checksum_name = f"_OFFLINE-SHA256SUMS.batch-{batch_number:03d}"
+    checksum_path = os.path.join(batch_dir, checksum_name)
+    log(f"[*] 正在生成第 {batch_number} 批 SHA256（大批次会花一些时间）")
+    with open(checksum_path, "w", encoding="utf-8", newline="\n") as f:
+        for item in selected:
+            path = _safe_local_file(batch_dir, item["path"])
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"批次文件缺失：{item['path']}")
+            actual = _sha256_file(path)
+            expected = item.get("sha256")
+            if expected and actual.lower() != expected.lower():
+                raise ValueError(
+                    f"{item['path']} 与首批锁定清单的 SHA256 不一致；"
+                    "远端版本可能已变化，请固定原 revision 后重试")
+            f.write(f"{actual}  {item['path'].replace(os.sep, '/')}\n")
+
+    plan_lines = [
+        "ModelScope Downloader 离线分批计划",
+        f"模型：{model}",
+        f"版本：{revision or '默认分支（首批文件清单和可用的远端 SHA256 已锁定）'}",
+        f"每批上限：{human(batch_bytes)}",
+        f"总批数：{len(batches)}",
+        "说明：文件保持原样；不要 cat/copy /b 拼接 safetensors 分片。",
+        "",
+    ]
+    for index, batch in enumerate(batches, 1):
+        plan_lines.append(
+            f"batch-{index:03d}: {len(batch)} 个文件，"
+            f"{human(sum(item['size'] for item in batch))}")
+        plan_lines.extend(f"  {item['path']}  {human(item['size'])}" for item in batch)
+    plan_text = "\n".join(plan_lines) + "\n"
+
+    model_name = model.split("/")[-1]
+    batch_name = f"batch-{batch_number:03d}"
+    instructions = f"""ModelScope Downloader 离线服务器操作说明
+
+本批：{batch_number}/{len(batches)}（{batch_name}）
+原则：每批目录中的模型文件复制到服务器同一个最终模型目录；不要拼接权重文件。
+
+Linux 服务器（把 /media/usb 和 /srv/models/{model_name} 换成实际路径）：
+  mkdir -p /srv/models/{model_name}/.offline-batches
+  rsync -av --exclude='_OFFLINE-*' /media/usb/{batch_name}/ /srv/models/{model_name}/
+  cp /media/usb/{batch_name}/{checksum_name} /srv/models/{model_name}/.offline-batches/
+  cp /media/usb/{batch_name}/_OFFLINE-VERIFY.py /srv/models/{model_name}/.offline-batches/
+  cd /srv/models/{model_name}
+  python3 .offline-batches/_OFFLINE-VERIFY.py . .offline-batches/{checksum_name}
+
+Windows 服务器（把 E: 和 D:\\models\\{model_name} 换成实际路径）：
+  robocopy E:\\{batch_name} D:\\models\\{model_name} /E /XF _OFFLINE-*
+  mkdir D:\\models\\{model_name}\\.offline-batches
+  copy E:\\{batch_name}\\{checksum_name} D:\\models\\{model_name}\\.offline-batches\\
+  copy E:\\{batch_name}\\_OFFLINE-VERIFY.py D:\\models\\{model_name}\\.offline-batches\\
+  python D:\\models\\{model_name}\\.offline-batches\\_OFFLINE-VERIFY.py D:\\models\\{model_name} D:\\models\\{model_name}\\.offline-batches\\{checksum_name}
+
+全部 {len(batches)} 批上传后，在 Linux 服务器执行：
+  cd /srv/models/{model_name}
+  test "$(find .offline-batches -maxdepth 1 -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq {len(batches)}
+  python3 .offline-batches/_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-*
+
+全部 {len(batches)} 批上传后，在 Windows PowerShell 执行：
+  $root='D:\\models\\{model_name}'
+  $sums=@(Get-ChildItem "$root\\.offline-batches\\_OFFLINE-SHA256SUMS.batch-*")
+  if ($sums.Count -ne {len(batches)}) {{ throw "批次校验清单数量不对：$($sums.Count)/{len(batches)}" }}
+  python "$root\\.offline-batches\\_OFFLINE-VERIFY.py" $root $sums.FullName
+
+最后确认模型目录中存在配置、tokenizer、权重 index（如有）及全部权重分片。
+只有全部批次校验通过后，才可删除下载机/移动盘上的批次。
+"""
+
+    artifacts = {
+        "_OFFLINE-BATCH-PLAN.txt": plan_text,
+        "_OFFLINE-SERVER-INSTRUCTIONS.txt": instructions,
+        "_OFFLINE-VERIFY.py": _OFFLINE_VERIFY_SCRIPT,
+    }
+    for name, content in artifacts.items():
+        with open(os.path.join(model_root, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        with open(os.path.join(batch_dir, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+    locked_plan = os.path.join(model_root, "_OFFLINE-BATCH-PLAN.json")
+    if os.path.isfile(locked_plan):
+        with open(locked_plan, "r", encoding="utf-8") as src:
+            content = src.read()
+        with open(os.path.join(batch_dir, "_OFFLINE-BATCH-PLAN.json"),
+                  "w", encoding="utf-8", newline="\n") as dst:
+            dst.write(content)
+    log(f"[ok] 第 {batch_number}/{len(batches)} 批校验与离线说明已生成：{batch_dir}")
+    return checksum_path
 
 
 def free_disk(path):
@@ -239,6 +494,10 @@ def run_cli(argv):
     ap.add_argument("--revision", default=None, help="版本/分支")
     ap.add_argument("--token", default=None, help="受限模型才需要")
     ap.add_argument("--retries", type=int, default=20)
+    ap.add_argument("--batch-size-gb", type=float, default=None,
+                    help="离线分批：每批上限 GB（完整文件分组，不切割权重文件）")
+    ap.add_argument("--batch-number", type=int, default=1,
+                    help="离线分批：下载第几批（从 1 开始）")
     ap.add_argument("--skip-media", action="store_true",
                     help="跳过图片/视频/音频等演示文件（推理用不到，更快更省盘）")
     ap.add_argument("--tar", action="store_true",
@@ -247,20 +506,63 @@ def run_cli(argv):
     exclude = list(a.exclude) if a.exclude else []
     if a.skip_media:
         exclude += MEDIA_EXCLUDE
-    info = expected_total(a.model, include=a.include, exclude=(exclude or None),
-                          revision=a.revision)
+    if a.batch_number < 1:
+        ap.error("--batch-number 必须从 1 开始")
+    if a.batch_size_gb is not None and a.batch_size_gb <= 0:
+        ap.error("--batch-size-gb 必须大于 0")
+    if a.batch_size_gb is None and a.batch_number != 1:
+        ap.error("使用 --batch-number 时必须同时提供 --batch-size-gb")
+    if a.batch_size_gb is not None and a.tar:
+        ap.error("离线分批模式不能使用 --tar；每批目录可直接搬运")
+
+    target = a.out
+    selected_include = a.include
+    batches = None
+    batch_bytes = None
+    if a.batch_size_gb is not None:
+        batch_bytes = max(1, int(a.batch_size_gb * 1024 ** 3))
+        try:
+            batches, plan_path, created = load_or_create_batch_plan(
+                a.out, a.model, a.revision, a.include, (exclude or None),
+                batch_bytes, token=a.token)
+        except (RuntimeError, ValueError) as e:
+            ap.error(str(e))
+        print(f"[*] {'已锁定' if created else '复用'}批次计划：{plan_path}")
+        if a.batch_number > len(batches):
+            ap.error(f"批次不存在：共 {len(batches)} 批，收到第 {a.batch_number} 批")
+        selected = batches[a.batch_number - 1]
+        selected_include = [item["path"] for item in selected]
+        target = os.path.join(a.out, f"batch-{a.batch_number:03d}")
+        total = sum(item["size"] for item in selected)
+        n = len(selected)
+        print(f"[*] 离线分批：共 {len(batches)} 批；本次第 {a.batch_number} 批，"
+              f"{n} 个文件，{human(total)}")
+        oversized = [item for item in selected if item["size"] > batch_bytes]
+        for item in oversized:
+            print(f"[!] 单文件 {item['path']} 为 {human(item['size'])}，超过批次上限，已单独成批")
+        info = (total, n)
+    else:
+        info = expected_total(a.model, include=a.include, exclude=(exclude or None),
+                              revision=a.revision, token=a.token)
+
     if info:
         total, n = info
         print(f"[*] 清单：{n} 个文件，共 {human(total)}")
-        free = free_disk(a.out)
+        free = free_disk(target)
         need = total * 2 if a.tar else total  # --tar 还要一份同等空间
+        if batches is not None:
+            need = max(0, total - dir_size(target))
         if free is not None and free < need:
             print(f"[!] 磁盘可能不够：需约 {human(need)}"
                   f"{'（含打包）' if a.tar else ''}，剩 {human(free)} — 继续尝试…")
-    download(a.model, a.out, revision=a.revision, include=a.include,
+    download(a.model, target, revision=a.revision, include=selected_include,
              exclude=(exclude or None), token=a.token, retries=a.retries)
+    if batches is not None:
+        write_offline_batch_artifacts(
+            a.out, target, a.model, a.revision, batches, a.batch_number,
+            batch_bytes)
     if a.tar:
-        make_archive(a.out)
+        make_archive(target)
 
 
 def _self_cmd(cli_args):
@@ -302,11 +604,24 @@ def _spawn_downloader(cli_args):
     # TQDM_DISABLE：新版 tqdm 认这个环境变量；老版不认也没事，父进程还有行过滤
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
                TQDM_DISABLE="1")
+    if getattr(sys, "frozen", False):
+        # PyInstaller 6.9+ 默认让同一 one-file EXE 的子进程复用父进程解包目录。
+        # GUI 把子进程当独立 CLI 实例使用，强制重新解包可避免父目录失效后
+        # 子进程在 pyi_rth__tkinter 阶段找不到 _tcl_data。
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return subprocess.Popen(
         _self_cmd(cli_args),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         encoding="utf-8", errors="replace", env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _run_self_spawn_smoke(cli_args):
+    """CI 专用：让 frozen 父 EXE 走与 GUI 相同的子进程启动链路。"""
+    proc = _spawn_downloader(cli_args)
+    for line in proc.stdout:
+        print(line, end="")
+    return proc.wait()
 
 
 # ───────────────────────────── GUI ─────────────────────────────
@@ -318,7 +633,7 @@ def run_gui():
     q = queue.Queue()  # worker → UI 线程安全通道
     root = tk.Tk()
     root.title(f"{APP_TITLE} v{APP_VERSION}")
-    root.geometry("720x500")
+    root.geometry("760x610")
 
     frm = ttk.Frame(root, padding=10)
     frm.pack(fill="both", expand=True)
@@ -349,21 +664,49 @@ def run_gui():
                     variable=skip_media_var).grid(row=5, column=0, columnspan=2,
                                                    sticky="w", pady=(6, 0))
 
+    batch_var = tk.BooleanVar(value=False)
+    batch_size_var = tk.StringVar(value="100")
+    batch_number_var = tk.StringVar(value="1")
+    batch_plan_var = tk.StringVar(value="关闭；普通模式会下载完整模型")
+    batch_frame = ttk.Frame(frm)
+    batch_frame.grid(row=6, column=0, columnspan=2, sticky="we", pady=(4, 0))
+    batch_check = ttk.Checkbutton(batch_frame, text="离线分批下载", variable=batch_var)
+    batch_check.pack(side="left")
+    ttk.Label(batch_frame, text="每批上限(GB)").pack(side="left", padx=(12, 3))
+    batch_size_entry = ttk.Entry(batch_frame, textvariable=batch_size_var, width=8)
+    batch_size_entry.pack(side="left")
+    ttk.Label(batch_frame, text="下载第").pack(side="left", padx=(12, 3))
+    batch_number_entry = ttk.Entry(batch_frame, textvariable=batch_number_var, width=5)
+    batch_number_entry.pack(side="left")
+    ttk.Label(batch_frame, text="批（完整文件分组，不切割）").pack(side="left", padx=(3, 0))
+
+    def update_batch_controls():
+        entry_state = "normal" if batch_var.get() else "disabled"
+        batch_size_entry.config(state=entry_state)
+        batch_number_entry.config(state=entry_state)
+        batch_plan_var.set("已启用；点下载后自动计算总批数" if batch_var.get()
+                           else "关闭；普通模式会下载完整模型")
+
+    batch_check.config(command=update_batch_controls)
+    update_batch_controls()
+    ttk.Label(frm, textvariable=batch_plan_var, foreground="#666").grid(
+        row=7, column=0, columnspan=2, sticky="w")
+
     progress_bar = ttk.Progressbar(frm, maximum=1000)
-    progress_bar.grid(row=6, column=0, columnspan=2, sticky="we", pady=(8, 2))
+    progress_bar.grid(row=8, column=0, columnspan=2, sticky="we", pady=(8, 2))
 
     status_var = tk.StringVar(value="就绪")
     status = ttk.Label(frm, textvariable=status_var, foreground="#0a0")
-    status.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 4))
+    status.grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 4))
 
     log_widget = scrolledtext.ScrolledText(frm, height=16, wrap="word")
-    log_widget.grid(row=9, column=0, columnspan=2, sticky="nsew")
-    frm.rowconfigure(9, weight=1)
+    log_widget.grid(row=11, column=0, columnspan=2, sticky="nsew")
+    frm.rowconfigure(11, weight=1)
     frm.columnconfigure(0, weight=1)
 
     about = ttk.Label(frm, text=f"v{APP_VERSION} · 作者 {APP_AUTHOR} · {APP_URL}（点击打开，问题/建议提 Issue）",
                       foreground="#06c", cursor="hand2")
-    about.grid(row=10, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    about.grid(row=12, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     def open_repo(_event=None):
         import webbrowser
@@ -379,7 +722,9 @@ def run_gui():
         log_widget.see("end")
 
     # 下载子进程状态（run_gui 闭包内共享；tkinter 单线程 UI，poll() 里统一消费）
-    state = {"proc": None, "stopped": False, "total": None}
+    state = {"proc": None, "stopped": False, "total": None,
+             "batch": False, "batch_number": None, "total_batches": None,
+             "model_root": None}
 
     def do_download():
         model = model_var.get().strip()
@@ -388,26 +733,73 @@ def run_gui():
             messagebox.showwarning(APP_TITLE, "请填模型 id 和保存文件夹")
             return
         # 模型 id 落到目标的子目录（避免直接下到选中目录根，便于多模型）
-        target = os.path.join(out, model.split("/")[-1])
+        model_root = os.path.join(out, model.split("/")[-1])
+        batch_enabled = batch_var.get()
+        batch_size_text = batch_size_var.get().strip()
+        batch_number_text = batch_number_var.get().strip()
+        if batch_enabled:
+            try:
+                batch_size_gb = float(batch_size_text)
+                batch_number = int(batch_number_text)
+                if batch_size_gb <= 0 or batch_number < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(APP_TITLE, "每批上限必须大于 0，批次必须是从 1 开始的整数")
+                return
+            target = os.path.join(model_root, f"batch-{batch_number:03d}")
+        else:
+            batch_size_gb, batch_number = None, None
+            target = model_root
         exclude = MEDIA_EXCLUDE if skip_media_var.get() else None
         dl_btn.config(state="disabled")
         stop_btn.config(state="normal")
         state["stopped"] = False
         state["total"] = None
+        state["batch"] = batch_enabled
+        state["batch_number"] = batch_number
+        state["total_batches"] = None
+        state["model_root"] = model_root
         progress_bar.config(value=0)
         status_var.set("查询模型清单…")
         status.config(foreground="#0a0")
+        batch_plan_var.set("正在计算远端文件清单和批次…" if batch_enabled
+                           else "关闭；普通模式会下载完整模型")
 
         def worker():
             # 1) 清单：总大小（百分比/ETA 用）+ 磁盘预检
-            info = expected_total(model, exclude=exclude)
+            args = ["--model", model, "--out", model_root if batch_enabled else target]
+            if batch_enabled:
+                batch_bytes = max(1, int(batch_size_gb * 1024 ** 3))
+                try:
+                    batches, plan_path, created = load_or_create_batch_plan(
+                        model_root, model, None, None, exclude, batch_bytes)
+                except (RuntimeError, ValueError) as e:
+                    q.put(("__DONE__", False, e, target))
+                    return
+                q.put(f"[*] {'已锁定' if created else '复用'}批次计划：{plan_path}\n")
+                if batch_number > len(batches):
+                    q.put(("__DONE__", False,
+                           ValueError(f"批次不存在：共 {len(batches)} 批，收到第 {batch_number} 批"),
+                           target))
+                    return
+                selected = batches[batch_number - 1]
+                total = sum(item["size"] for item in selected)
+                n = len(selected)
+                info = (total, n)
+                q.put(("__BATCH_PLAN__", len(batches), batch_number, total, n))
+                args += ["--batch-size-gb", batch_size_text,
+                         "--batch-number", str(batch_number)]
+            else:
+                info = expected_total(model, exclude=exclude)
             if info:
                 total, n = info
                 q.put(("__TOTAL__", total))
-                q.put(f"[*] 清单：{n} 个文件，共 {human(total)}\n")
-                free = free_disk(out)
-                if free is not None and free < total:
-                    q.put(f"[!] 注意：磁盘剩 {human(free)}，不够 {human(total)}，"
+                label = "本批" if batch_enabled else "清单"
+                q.put(f"[*] {label}：{n} 个文件，共 {human(total)}\n")
+                free = free_disk(target)
+                need = max(0, total - dir_size(target)) if batch_enabled else total
+                if free is not None and free < need:
+                    q.put(f"[!] 注意：磁盘剩 {human(free)}，不够 {human(need)}，"
                           f"大概率会下到一半失败！建议停止并换大盘。\n")
             else:
                 q.put("[!] 查不到模型清单（不影响下载，只是不显示百分比）\n")
@@ -418,7 +810,6 @@ def run_gui():
                 return
 
             # 2) 起下载子进程（可被「停止」kill；.incomplete 保留 → 重下即续传）
-            args = ["--model", model, "--out", target]
             if exclude:
                 args += ["--skip-media"]
             try:
@@ -435,6 +826,8 @@ def run_gui():
                 line = _clean_child_line(line.rstrip("\n"))
                 if line:
                     tail = (tail + [line])[-8:]
+                    if "正在生成第" in line and "SHA256" in line:
+                        q.put(("__HASHING__", line))
                     q.put(line + "\n")
             rc = proc.wait()
             state["proc"] = None
@@ -493,9 +886,9 @@ def run_gui():
         threading.Thread(target=worker, daemon=True).start()
 
     dl_btn = ttk.Button(frm, text="下载 / Download", command=do_download)
-    dl_btn.grid(row=8, column=0, sticky="we", pady=(0, 6))
+    dl_btn.grid(row=10, column=0, sticky="we", pady=(0, 6))
     stop_btn = ttk.Button(frm, text="停止", command=do_stop, state="disabled")
-    stop_btn.grid(row=8, column=1, sticky="we", padx=(6, 0), pady=(0, 6))
+    stop_btn.grid(row=10, column=1, sticky="we", padx=(6, 0), pady=(0, 6))
 
     def poll():
         import queue as _q
@@ -504,10 +897,18 @@ def run_gui():
                 item = q.get_nowait()
                 if isinstance(item, tuple) and item and item[0] == "__TOTAL__":
                     state["total"] = item[1]
+                elif isinstance(item, tuple) and item and item[0] == "__BATCH_PLAN__":
+                    _, total_batches, batch_number, total, n = item
+                    state["total_batches"] = total_batches
+                    batch_plan_var.set(
+                        f"共 {total_batches} 批；当前第 {batch_number} 批："
+                        f"{n} 个完整文件，{human(total)}")
                 elif isinstance(item, tuple) and item and item[0] == "__STARTED__":
                     status_var.set("下载中…（可最小化；「停止」后重下即续传）")
                     if state.get("on_started"):
                         state["on_started"]()
+                elif isinstance(item, tuple) and item and item[0] == "__HASHING__":
+                    status_var.set("下载完成，正在生成本批 SHA256 校验清单…")
                 elif isinstance(item, tuple) and item and item[0] == "__PROG__":
                     _, cur, speed = item
                     total = state["total"]
@@ -557,17 +958,37 @@ def run_gui():
                     stop_btn.config(state="disabled")
                     if ok:
                         progress_bar.config(value=1000)
-                        status_var.set("完成 ✓")
                         status.config(foreground="#0a0")
-                        if messagebox.askyesno(
+                        if state["batch"]:
+                            batch_number = state["batch_number"]
+                            total_batches = state["total_batches"]
+                            guide = os.path.join(
+                                state["model_root"], "_OFFLINE-SERVER-INSTRUCTIONS.txt")
+                            status_var.set(f"第 {batch_number}/{total_batches} 批完成 ✓")
+                            log_ui(f"[ok] 本批可搬运：{target}")
+                            log_ui(f"[i] 服务器命令说明：{guide}")
+                            if batch_number < total_batches:
+                                batch_number_var.set(str(batch_number + 1))
+                                next_hint = f"界面已切到第 {batch_number + 1} 批；本批上传并校验后再继续。"
+                            else:
+                                next_hint = "这是最后一批；全部上传后按说明执行总校验。"
+                            messagebox.showinfo(
                                 APP_TITLE,
-                                f"下载完成：\n{target}\n\n"
-                                f"现在打包成 .tar（带校验码）便于传到部署机吗？\n"
-                                f"需额外同等磁盘空间；选「否」可稍后手动打包。"):
-                            start_tar(target)
+                                f"第 {batch_number}/{total_batches} 批完成：\n{target}\n\n"
+                                f"已生成 SHA256、校验脚本和服务器命令。\n"
+                                f"{next_hint}\n\n"
+                                f"服务器校验通过前不要删除本批。")
                         else:
-                            b, p = os.path.basename(target), os.path.dirname(target)
-                            log_ui(f"如需手动打包：tar -cf \"{b}.tar\" -C \"{p}\" \"{b}\"")
+                            status_var.set("完成 ✓")
+                            if messagebox.askyesno(
+                                    APP_TITLE,
+                                    f"下载完成：\n{target}\n\n"
+                                    f"现在打包成 .tar（带校验码）便于传到部署机吗？\n"
+                                    f"需额外同等磁盘空间；选「否」可稍后手动打包。"):
+                                start_tar(target)
+                            else:
+                                b, p = os.path.basename(target), os.path.dirname(target)
+                                log_ui(f"如需手动打包：tar -cf \"{b}.tar\" -C \"{p}\" \"{b}\"")
                     else:
                         status_var.set("失败 ✗")
                         status.config(foreground="#c00")
@@ -617,6 +1038,11 @@ def run_gui():
 
 def main():
     _harden_stdio()
+    if len(sys.argv) > 1 and sys.argv[1] == "--_self-spawn-smoke":
+        if len(sys.argv) == 2:
+            print("[x] --_self-spawn-smoke 缺少子进程参数", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(_run_self_spawn_smoke(sys.argv[2:]))
     # 有参数 → CLI；无参数（双击 exe）→ GUI
     if len(sys.argv) > 1:
         run_cli(sys.argv[1:])

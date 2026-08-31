@@ -1,9 +1,21 @@
 # ModelScope Downloader —— 开发新会话起点（START HERE）
 
 > 接手「这个独立 Win10 工具（双击 exe 下 ModelScope 模型，给 air-gapped 部署传模型用）」的开发会话，**先读这页**。
-> 2026-06-24 起。独立项目（`/home/dff652/my_project/modelscope-downloader/`；已 `git init`，3 次提交，默认分支 `main`，GitHub `origin` 已 **push 成功**，远端 `main = e3278d1`），**从 ts-platform 的 `scripts/tools/modelscope-download/`（CLI 版）拆出独立化**，目标是给**非技术操作员**的双击 GUI exe。
+> 状态快照（2026-08-31）：独立项目（`/home/dff652/my_project/modelscope-downloader/`，默认分支 `main`，GitHub `origin` 已 **push 成功**，该快照记录的远端 `main = 211d265`），**从 ts-platform 的 `scripts/tools/modelscope-download/`（CLI 版）拆出独立化**，目标是给**非技术操作员**的双击 GUI exe。v0.4.0 按 release candidate 处理；是否已有公开 EXE 及当前资产，以 GitHub Releases 为准，不要把工作区状态当成已发布能力。
 
-## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-08-17
+## ⏭️ 下次开工（状态快照 + 第一步）— 截至 2026-08-31
+
+### v0.4.0 离线分批下载（release candidate；发布状态以 Releases 为准）
+
+- GUI 新增「离线分批下载」开关、「每批上限(GB)」和「下载第」批次；工具先查远端清单，再按路径稳定排序，把**完整文件**装入不超过上限的批次。单文件超过上限时独占一批，不切割或拼接权重。
+- 工具支持设置每批大小，但不支持直接输入“总共分成几批”：总批数 N 由完整文件清单自动计算并显示，当前批次 K 必须为 1..N。代码只拒绝小于等于 0 的批大小；实际建议按移动介质与下载机剩余空间的较小值设置，并预留 10%–20% 余量。某个文件本身超过介质容量时，分批无法解决。
+- 每批写到 `<保存目录>/<模型名>/batch-NNN/`，不会要求手动导出或拼接文件；服务器侧只是把不同批次的原始文件复制/合入同一个最终模型目录。下载完成后工具不会自动删除批次，必须在服务器校验通过后由操作员自行清理。
+- 首次规划写入 `<模型名>/_OFFLINE-BATCH-PLAN.json`，锁定模型、revision、过滤条件、批大小、文件名/大小和可用远端 SHA256；后续批次必须复用同一保存目录和设置，避免跨天混入新版本。中断后重跑同一批仍使用断点续传。
+- 每批完成后生成 `_OFFLINE-SHA256SUMS.batch-NNN`、纯标准库 `_OFFLINE-VERIFY.py`、全批计划和 `_OFFLINE-SERVER-INSTRUCTIONS.txt`。说明文件包含 Linux `rsync`、Windows `robocopy` 的每批复制/校验命令，以及全部批次到齐后的总校验命令；校验器不联网。
+- CLI 对应参数：`--batch-size-gb N --batch-number K`；分批与 `--tar` 互斥。GUI 完成一批会自动把批次输入框切到下一批，但不会替用户删除任何文件。
+- 当前验证：`python3 -m py_compile app.py tests/test_batching.py`、`python3 -m unittest discover -s tests -v`（当前 11 项单测）和 `git diff --check` 已过；Windows workflow 已增加真实小模型分批下载 + 便携校验器 Smoke 4。发布候选必须以当前提交对应的 CI 运行结果为准，不能用本机通过替代 CI 证据。
+- Tcl 临时目录风险修复：v0.4.0 frozen 子进程已设置 `PYINSTALLER_RESET_ENVIRONMENT=1`，并把 Smoke 3 设计为真正的 GUI 父 EXE→CLI 子 EXE 路径；目前仍待 CI 和真 Windows 验证，不能把“已实施”写成“已证实有效”。
+- 真 Windows 边界：此前 v0.3.x 的 GUI 有过真机基线验证；v0.4.0 新增的批次控件、N/K 显示与自动切换、分批停止/续传、产物路径仍未在真 Windows GUI 中点验。Smoke 3 覆盖父 EXE→CLI 子 EXE 的自动化路径，Smoke 4 覆盖 console 分批下载/校验，但二者都不等于人工双击 GUI 验收。CI 四重 Smoke 通过后可以先发布 prerelease；稳定版/正式交付操作员前，必须补真 Windows 双击、布局、至少两批小模型、停止续传、逐批校验和最后总校验。
 
 ### 2026-08-17 真机偶发 `_tcl_data` 缺失（v0.3.2）
 
@@ -11,7 +23,7 @@
 - 关闭整个工具后重新打开即恢复；新进程重新解包出 `%TEMP%\_MEI...`，随后正常进入 Hub 下载。ModelScope 实时 API 确认该模型存在，清单为 26 个文件、32,152,070,926 bytes（29.94 GiB），与 GUI 显示的 29.9 GB 一致。
 - 已确认 v0.3.2 Release EXE 内含 `_tcl_data` 文件，故排除“构建时根本没打包 Tcl/Tk”。可确认的直接原因是当次 `_MEI` 临时资源目录在子进程启动时不可用；“临时解包偶发不完整、被 Defender/清理软件移除，或 one-file 父子进程复用状态异常”仍是候选解释，尚无足够证据区分，不写成已证实根因。
 - 代码触发点：GUI 通过 `_spawn_downloader()` 以 `sys.executable` 再启动同一个 one-file EXE，并继承当前环境。PyInstaller 6.9+ 对“同一 EXE 启动子进程”默认复用已解包资源；官方提供 `PYINSTALLER_RESET_ENVIRONMENT=1` 强制按新实例重新解包。
-- **尚未实施的修复候选**：frozen 子进程增加 `PYINSTALLER_RESET_ENVIRONMENT=1`；固定 PyInstaller 构建版本；增加“真正的 GUI 父 EXE 再启动 CLI 子 EXE” Windows 冒烟。当前 Smoke 3 只是从 PowerShell 直接带 CLI 参数启动 windowed EXE，**没有覆盖嵌套自启动路径**。
+- **v0.4.0 已实施、待验证**：frozen 子进程增加 `PYINSTALLER_RESET_ENVIRONMENT=1`，Smoke 3 改为覆盖“真正的 GUI 父 EXE 再启动 CLI 子 EXE”路径；仍需 CI 和真 Windows 验证。固定 PyInstaller 构建版本仍是后续稳定性候选项。
 - **当前操作员恢复方式**：偶发一次时关闭所有工具窗口后重开；若反复发生，再查 Defender 隔离记录、临时目录清理软件和当次 `_MEI` 目录，不建议粗暴清空整个 `%TEMP%`。
 
 ### v0.3.2（同日第四轮）
@@ -43,7 +55,7 @@
 - ✅ **exe 已产出并通过真 Windows 冒烟（路线 C：GitHub Actions）**。v0.2.1，commit `9bffadb`。workflow `.github/workflows/build-windows-exe.yml` 在 `windows-latest` 上：PyInstaller 打窗口版 exe + console 冒烟版 → `--help` → **真下 `Qwen/Qwen3-0.6B` 的 `*.json` + `--tar` + `Get-FileHash` 复核 sha256 全过**——「pyinstaller 漏 modelscope hidden-import」这一最大未知已排除（`--collect-all modelscope` 就够了，一个 hidden-import 都不用补）。
 - **拿 exe**：GitHub → Actions → 最新绿色 run → Artifacts → `ModelScopeDownloader-exe`（zip ~33MB，保留 90 天）。每次 push main 自动重新构建。
 - **CI 首轮曾失败**，病因不是打包而是**中文输出在非 UTF-8 控制台崩**（cp1252 管道 print 中文 → `UnicodeEncodeError`，英文 Windows 也会炸）。已修：`app.py` `_harden_stdio()`（`errors="replace"`），本机 ascii 控制台复现+验证。CI 失败现在会**自动开公开 issue 附冒烟日志**（本机无 admin token 拉不了 Actions 日志，这是排错通道）。
-- **唯一残余未验项：GUI 没在真 Windows 上点过**（tkinter 窗口/弹窗/浏览文件夹）。CLI 路径已被 CI 端到端实证，GUI 与之共享全部 import 和下载逻辑，风险低但要真机双击一次才算闭环。
+- **v0.2.1 当时的残余未验项是 GUI 没在真 Windows 上点过**（tkinter 窗口/弹窗/浏览文件夹）；该项随后在 v0.3.x 基线中完成。v0.4.0 新增批次控件和 GUI→CLI 分批链路的未验边界，以本页顶部状态为准。
 - 下面 06-24 的快照保留作历史。
 
 ## 🕳️ 踩坑与结论（2026-07-06 会话，v0.2.1→v0.3.1 全过程）
@@ -110,7 +122,7 @@
 
 ### 本会话固化的工程机制
 
-- **CI（`build-windows-exe.yml`）**：push main → 真 Windows 构建 + 三重冒烟（console `--help`；console 真下载+tar+sha256 复核；windowed exe 管道跑 CLI）→ exe 挂 Artifacts（90天/需登录）。失败自动开 issue 带日志。第三项只验 windowed CLI，不等于完整 GUI→子 EXE 嵌套路径（见 2026-08-17 记录）。
+- **CI（`build-windows-exe.yml`）**：push main/tag → 真 Windows 构建 + 四重冒烟（console `--help`；console 真下载+tar+sha256 复核；windowed exe 的 GUI 父进程→CLI 子进程；console 分批下载+便携校验器）→ exe 挂 Artifacts（90天/需登录）。tag 构建在四个关卡全过后创建 prerelease；失败自动开 issue 带日志。Smoke 3 覆盖自动化父子 EXE 路径，但不等于人工双击 GUI 验收（见 2026-08-17 记录）。
 - **发版**：打 `v*` tag → 同套关卡全过才发 Release（公开/永久/免登录），资产名 `ModelScopeDownloader-vX.Y.Z.exe`（自 v0.3.1）。GUI 标题栏也显示版本，双保险。
 - **测试基线（本机 Linux 能跑的）**：`py_compile`；CLI 真下载（venv + `--include "*.json"` 秒级完成）；`_spawn_downloader` 子进程真下载；mock tkinter 构造；过滤器/清单单测。
 
@@ -139,7 +151,7 @@ modelscope-downloader/
 ├── app.py              核心 download()/make_archive()/expected_total() + CLI + GUI(tkinter, 下载走子进程)
 ├── build.bat           Windows 本地 pyinstaller 出 exe（备用路径；CI 是主发布通道）
 ├── .github/workflows/
-│   └── build-windows-exe.yml  CI：真Windows构建+三重冒烟+Artifacts；v* tag 自动发 Release
+│   └── build-windows-exe.yml  CI：真Windows构建+四重冒烟+Artifacts；v* tag 自动发 Release
 ├── requirements.txt    modelscope (+构建时 pyinstaller)
 ├── README.md           操作员/打包者/CLI 用法
 ├── START-HERE.md       本文（开发起点）
@@ -183,12 +195,12 @@ modelscope-downloader/
 5. 无自动更新 / 版本检查；~~无 LICENSE~~ ✅ 已加 MIT。
 6. **打包大模型的磁盘/耗时未在真机量过**：300G 打 tar 要再占 ~300G 且耗时数分钟，GUI 里只 log「打包中…」没真进度条。← 仍未做（磁盘预检已能提前预警空间问题）
 
-## 下一步（开发待办，按优先级）
+## 下一步（v0.4.0 发布前待办，按优先级）
 
-1. ~~在一台真 Windows 上跑 `build.bat` 出 exe~~ ✅ **07-06 用路线 C（GitHub Actions）解决**：CI 出 exe + 冒烟 + Release，hidden-imports 一个没缺。`build.bat` 仍保留（给无外网/想本地打包的场景），flags 与 CI 一致。
-2. ~~加「下载完自动打 tar + 出 sha256」~~ ✅ 已做（`--tar` / GUI 弹问，已 Linux 实测）。~~`--include` 预设跳 video/preprocessor~~ ✅ 已做（`--skip-media`，exclude 式更安全，不怕漏权重）。剩：放一个真 `icon.ico`（`--icon` 接线已就绪）。
-3. ✅ 已出**源码 release zip**（`dist/modelscope-downloader-win.zip`，含 app.py/build.bat/requirements.txt/README，发给有 Windows 的打包者）。✅ **操作员一页纸**已写（`操作员须知.txt`，纯文本随 exe 发，无术语）。剩：真机出 **exe**；下次重做 dist zip 时把 `操作员须知.txt` 一并打进去。
-4. ✅ git remote 已 **push 成功**（origin 改 SSH `git@github.com:dff652/modelscope-downloader.git`，远端 `main = e3278d1`，本地已设上游）。✅ LICENSE 已加（MIT）。
+1. 先由主代理 review `app.py`、tests、workflow 和本次三份文档，跑 Linux 关卡；提交/推送状态以 `git status` 和远端 CI 为准。
+2. 先由主代理完成 review 和 Linux 关卡，再推送 `main`、等待 CI 四重 Smoke 全绿；通过后可创建并推送 `v0.4.0` prerelease，检查资产和下载说明。是否已经公开，以 Releases 页面为准。
+3. 稳定版/正式交付操作员前补真 Windows GUI 验收：双击、批次控件布局、至少两批小模型、N/K 显示与自动切换、停止/续传、每批产物和服务器说明路径；确认 Smoke 3/4 之外的人工 GUI 体验。未完成前不得把 prerelease 宣称为稳定版。
+4. 普通模式的 `.tar`/`.sha256`、`--skip-media`、LICENSE 和既有 CI 构建链路已存在；`build.bat` 仍是本地备用打包路径，不是 v0.4.0 的发布证明。
 
 ## 构建方式：出 Windows exe 的几条路（06-24 调研；**07-06 已决：路线 C 落地**，A/B 留档备用）
 
@@ -202,7 +214,7 @@ modelscope-downloader/
 | **B. Go 重写 + 交叉编译** | 否 | **真·原生小 exe ~10MB**，无 Python / 无杀软误报 / 无 hidden-import | 要用 Go 重实现 ModelScope 下载协议（hub HTTP API：列文件→逐个下→续传，现在最稳那部分会被重写，有协议对不上的风险）+ 简单 GUI（`lxn/walk` 纯 Go、无 cgo、可从 Linux 交叉编译） | 需先装 Go（apt 或 golang Docker 镜像） |
 | **C. GitHub Actions** | 否（CI 真 Windows build） | pyinstaller 包 | 最规范、真 Windows 环境；需 GitHub remote + 外网，迭代慢 | 需联网 + 推仓库 |
 
-**建议**：先 **A**（最快拿到可用 exe，复用已验证代码，操作员机彻底不碰 Python）；若嫌 pyinstaller 包重 / 被杀软盯，再上 **B**（终极干净小二进制）。**Nuitka** 也能编译，但仍需 Windows + C 编译器，不解决跨平台问题，略。
+**当前发布选择**：继续使用 **C（GitHub Actions）** 作为 v0.4.0 官方构建/发布通道，因为它在真 Windows 上构建并运行 Smoke；A/B 只是历史备选，未作为本次发布证据。Linux 本机的单元测试和 CLI 校验不能替代真 Windows GUI 验收。**Nuitka** 也需要 Windows + C 编译器，不改变这条边界。
 
 ## 关联
 
