@@ -111,7 +111,7 @@ python D:\models\<模型名>\.offline-batches\_OFFLINE-VERIFY.py D:\models\<模�
 ```bash
 cd /srv/models/<模型名>
 for f in .offline-batches/_OFFLINE-SHA256SUMS.batch-001 .offline-batches/_OFFLINE-SHA256SUMS.batch-002; do test -f "$f" || { echo "缺少 $f"; exit 1; }; done
-test "$(find .offline-batches -maxdepth 1 -type f -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq 2
+test "$(find .offline-batches -maxdepth 1 -type f -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq 2 || { echo "批次校验清单总数不是 2"; exit 1; }
 python3 .offline-batches/_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-001 .offline-batches/_OFFLINE-SHA256SUMS.batch-002
 ```
 

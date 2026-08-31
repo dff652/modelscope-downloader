@@ -336,7 +336,7 @@ Windows 服务器（把 E: 和 D:\\models\\{model_name} 换成实际路径）：
 全部 {len(batches)} 批上传后，在 Linux 服务器执行：
   cd /srv/models/{model_name}
   for f in {linux_checksums}; do test -f "$f" || {{ echo "缺少 $f"; exit 1; }}; done
-  test "$(find .offline-batches -maxdepth 1 -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq {len(batches)}
+  test "$(find .offline-batches -maxdepth 1 -name '_OFFLINE-SHA256SUMS.batch-*' | wc -l)" -eq {len(batches)} || {{ echo "批次校验清单总数不是 {len(batches)}"; exit 1; }}
   python3 .offline-batches/_OFFLINE-VERIFY.py . {linux_checksums}
 
 全部 {len(batches)} 批上传后，在 Windows PowerShell 执行：

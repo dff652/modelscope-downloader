@@ -122,6 +122,7 @@ class OfflineArtifactsTests(unittest.TestCase):
             self.assertIn(".offline-batches/_OFFLINE-SHA256SUMS.batch-001", instructions)
             self.assertIn(".offline-batches/_OFFLINE-SHA256SUMS.batch-002", instructions)
             self.assertIn("缺少批次校验清单", instructions)
+            self.assertIn("批次校验清单总数不是 2", instructions)
             self.assertNotIn(
                 "_OFFLINE-VERIFY.py . .offline-batches/_OFFLINE-SHA256SUMS.batch-*",
                 instructions)
